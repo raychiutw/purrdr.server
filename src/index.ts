@@ -13,6 +13,7 @@ import {
   refreshIdentity,
   removeIdentity,
 } from "./members";
+import { registerPairing, revokePairing, sendPush } from "./push";
 import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
 import { authenticate, issueTokens, revokeRefreshToken, rotateRefreshToken } from "./tokens";
 
@@ -32,6 +33,11 @@ export default {
 async function route(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
   const key = `${request.method} ${pathname}`;
+  const pairingPath = /^DELETE \/v1\/members\/me\/push-pairings\/([^/]+)$/.exec(key);
+  if (pairingPath) {
+    await revokePairing(env, await authenticate(env, request), decodeURIComponent(pairingPath[1]!));
+    return new Response(null, { status: 204 });
+  }
   switch (key) {
     case "POST /v1/sessions":
       return signIn(request, env);
@@ -62,6 +68,12 @@ async function route(request: Request, env: Env): Promise<Response> {
     case "POST /v1/app-store/notifications":
       await handleAppStoreNotification(env, requireString(await readJson(request), "signedPayload"));
       return json({ received: true });
+    case "POST /v1/members/me/push-pairings":
+      await registerPairing(env, await authenticate(env, request), request);
+      return json({ registered: true }, 201);
+    case "POST /v1/push":
+      await sendPush(env, request);
+      return json({ delivered: true });
     default:
       throw new ApiError(404, "not_found", "Not found.");
   }

@@ -28,10 +28,13 @@
     // StoreKit 交易與 App Store Server Notifications 的 JWS 憑證鏈最上層必須跟這裡的某一張逐位元組相同。
     "APPLE_ROOT_CERTIFICATES": "REPLACE_ME_APPLE_ROOT_CA_G3_BASE64",
     // App Store Connect 的 Apple ID(數字);只檢查 Production 環境的通知。
-    "APP_STORE_APP_APPLE_ID": "REPLACE_ME_APP_APPLE_ID"
+    "APP_STORE_APP_APPLE_ID": "REPLACE_ME_APP_APPLE_ID",
+    // APNs 驗證金鑰(.p8)的 Key ID(推播轉送，#29)。Team ID 沿用 APPLE_TEAM_ID,topic 是 APPLE_CLIENT_ID(bundle id)。
+    "APNS_KEY_ID": "REPLACE_ME_APNS_KEY_ID"
   },
   // Secrets:值不寫在這裡，用 `wrangler secret put <名稱>` 設定。
   //   APPLE_PRIVATE_KEY    Sign in with Apple 私鑰 .p8 的 PEM 全文(PKCS#8)
   //   ACCESS_TOKEN_SECRET  簽存取權杖(HS256)的隨機密鑰，至少 32 bytes
-  "secrets": { "required": ["APPLE_PRIVATE_KEY", "ACCESS_TOKEN_SECRET"] }
+  //   APNS_PRIVATE_KEY     APNs 驗證金鑰 .p8 的 PEM 全文(PKCS#8)
+  "secrets": { "required": ["APPLE_PRIVATE_KEY", "ACCESS_TOKEN_SECRET", "APNS_PRIVATE_KEY"] }
 }
