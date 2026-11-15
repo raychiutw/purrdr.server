@@ -147,6 +147,8 @@ export function apnsPayload(push: PushRequest, keyHash: string): Record<string, 
       alert: { title: push.workspace, "loc-key": "An agent needs you." },
       sound: "default",
       "interruption-level": "time-sensitive",
+      // app 為這個類別設了隱藏預覽時的通用文字(HIG:hiddenPreviewsBodyPlaceholder)。
+      category: "AGENT_BLOCKED",
     },
     pairing: keyHash,
     ...(push.pane === null ? {} : { pane: push.pane }),

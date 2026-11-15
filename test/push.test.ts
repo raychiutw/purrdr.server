@@ -176,6 +176,7 @@ describe("主機外掛送推播", () => {
         alert: { title: "weather-app", "loc-key": "An agent needs you." },
         sound: "default",
         "interruption-level": "time-sensitive",
+        category: "AGENT_BLOCKED",
       },
       pairing: await hashOf(key),
       pane: "w2:p1",
