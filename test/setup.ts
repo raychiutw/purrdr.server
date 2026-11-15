@@ -12,7 +12,7 @@ beforeEach(async () => {
 afterEach(async () => {
   identityProviders.uninstall();
   // 依 foreign key 的相反順序清空(d1_migrations 保留，下一個測試不必重跑 migration)。
-  for (const table of ["refresh_tokens", "identities", "entitlements", "synced_hosts", "members"]) {
+  for (const table of ["refresh_tokens", "identities", "entitlements", "synced_hosts", "push_pairings", "members"]) {
     await env.DB.prepare(`DELETE FROM ${table}`).run();
   }
 });

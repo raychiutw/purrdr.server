@@ -11,6 +11,25 @@ const GOOGLE_KID = "test-google-kid";
 export type AppleTokenCall = { code: string; clientSecretValid: boolean; clientId: string };
 export type AppleRevokeCall = { token: string; tokenTypeHint: string | null; clientSecretValid: boolean };
 
+/// 送到假 APNs 的一則推播。
+export type ApnsCall = {
+  /** `production` = api.push.apple.com、`sandbox` = api.sandbox.push.apple.com。 */
+  environment: "production" | "sandbox";
+  deviceToken: string;
+  headers: Record<string, string>;
+  /** provider token(ES256 JWT)用測試金鑰的公鑰驗得過、kid 與 iss 正確。 */
+  providerTokenValid: boolean;
+  payload: any;
+};
+
+/// 假 APNs 的回應:200 成功，否則帶 Apple 的 reason(例如 410 `Unregistered`、400 `BadDeviceToken`)。
+export type ApnsReply = { status: number; reason?: string };
+
+const APNS_ORIGINS: Record<string, ApnsCall["environment"]> = {
+  "https://api.push.apple.com": "production",
+  "https://api.sandbox.push.apple.com": "sandbox",
+};
+
 class IdentityProviders {
   appleTokenCalls: AppleTokenCall[] = [];
   appleRevokeCalls: AppleRevokeCall[] = [];
@@ -18,6 +37,10 @@ class IdentityProviders {
   appleRevokeStatus = 200;
   /** Apple token 端點回的狀態碼(400 = invalid_grant)。 */
   appleTokenStatus = 200;
+  /** 假 APNs 收到的推播。 */
+  apnsCalls: ApnsCall[] = [];
+  /** 假 APNs 依序回的結果;用完之後一律 200。 */
+  apnsReplies: ApnsReply[] = [];
   private spy: ReturnType<typeof vi.spyOn> | undefined;
 
   install() {
@@ -25,6 +48,8 @@ class IdentityProviders {
     this.appleRevokeCalls = [];
     this.appleRevokeStatus = 200;
     this.appleTokenStatus = 200;
+    this.apnsCalls = [];
+    this.apnsReplies = [];
     this.spy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => this.route(new Request(input, init)));
   }
 
@@ -35,6 +60,10 @@ class IdentityProviders {
   private async route(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const route = `${request.method} ${url.origin}${url.pathname}`;
+    const apnsEnvironment = APNS_ORIGINS[url.origin];
+    if (apnsEnvironment && request.method === "POST" && url.pathname.startsWith("/3/device/")) {
+      return this.apns(request, apnsEnvironment, url.pathname.slice("/3/device/".length));
+    }
     switch (route) {
       case "GET https://appleid.apple.com/auth/keys":
         return Response.json({ keys: [publicJwk(env.TEST_APPLE_ID_TOKEN_KEY, APPLE_KID)] });
@@ -71,9 +100,37 @@ class IdentityProviders {
         throw new TypeError(`測試沒有預期這個對外請求：${route}`);
     }
   }
+
+  /// APNs provider API(HTTP/2 POST /3/device/<token>):驗 provider token、記錄 header 與 payload。
+  private async apns(request: Request, environment: ApnsCall["environment"], deviceToken: string): Promise<Response> {
+    const headers: Record<string, string> = {};
+    request.headers.forEach((value, name) => (headers[name] = value));
+    const authorization = headers.authorization ?? "";
+    this.apnsCalls.push({
+      environment,
+      deviceToken,
+      headers,
+      providerTokenValid: authorization.startsWith("bearer ") && (await verifyApnsProviderToken(authorization.slice("bearer ".length))),
+      payload: await request.json(),
+    });
+    const reply = this.apnsReplies.shift() ?? { status: 200 };
+    if (reply.status === 200) return new Response(null, { status: 200, headers: { "apns-id": crypto.randomUUID() } });
+    return Response.json({ reason: reply.reason ?? "InternalServerError" }, { status: reply.status });
+  }
 }
 
 export const identityProviders = new IdentityProviders();
+
+/// APNs 的 provider token:ES256、kid 是 APNs Key ID、iss 是 Team ID、有 iat。
+async function verifyApnsProviderToken(token: string): Promise<boolean> {
+  try {
+    const key = await importJWK(JSON.parse(env.TEST_APNS_PUBLIC_JWK) as JWK, "ES256");
+    const { payload, protectedHeader } = await jwtVerify(token, key, { issuer: env.APPLE_TEAM_ID, algorithms: ["ES256"] });
+    return protectedHeader.kid === env.APNS_KEY_ID && typeof payload.iat === "number";
+  } catch {
+    return false;
+  }
+}
 
 function publicJwk(privateJson: string, kid: string): JWK {
   const { kty, n, e } = JSON.parse(privateJson) as JWK;
