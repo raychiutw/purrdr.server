@@ -29,12 +29,21 @@ CREATE TABLE entitlements (
 
 CREATE INDEX entitlements_member ON entitlements (member_id);
 
--- 主機同步(#30):以單一主機為單位、最後寫入者勝，刪除留紀錄(deleted_at)。
+-- 主機同步(#30、ADR-0007):會員各裝置共用的主機清單。一列是一台主機(id 由 app 產生的 UUID)。
+-- 只存主機名稱、位址(含埠)、使用者名稱、連線方式、host key 指紋;私鑰、密碼、登入方式、herdr 設定都不上傳。
+-- 以單一主機為單位最後修改者勝(比 modified_at,app 端修改的時間);刪除留紀錄(deleted_at,欄位清空),
+-- 同一個 id 之後的上傳一律忽略，所以已刪除的主機不會被還沒同步到刪除的裝置傳回來。時間都是 Unix epoch 毫秒。
 CREATE TABLE synced_hosts (
   member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,
   host_id TEXT NOT NULL,
-  payload TEXT,
-  updated_at INTEGER NOT NULL,
+  name TEXT,
+  address TEXT,
+  port INTEGER,
+  username TEXT,
+  connection_method TEXT CHECK (connection_method IN ('tailscale_ssh', 'openssh')),
+  host_key_fingerprint TEXT,
+  modified_at INTEGER NOT NULL,
   deleted_at INTEGER,
+  updated_at INTEGER NOT NULL,
   PRIMARY KEY (member_id, host_id)
 );

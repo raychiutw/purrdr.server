@@ -33,10 +33,14 @@ async function giveSubscription(memberId: string) {
     .run();
 }
 
-/// 讓會員有主機同步資料(#30 才會有正式的寫入路徑)。
+/// 讓會員有主機同步資料(正式的寫入路徑要有訂閱，見 host-sync.test.ts;這裡只測合併與刪除規則)。
 async function giveSyncedHost(memberId: string) {
-  await env.DB.prepare("INSERT INTO synced_hosts (member_id, host_id, payload, updated_at) VALUES (?, 'host-1', '{}', ?)")
-    .bind(memberId, Date.now())
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO synced_hosts (member_id, host_id, name, address, port, username, connection_method, modified_at, updated_at)
+     VALUES (?, 'host-1', 'Studio Mac', 'studio-mac', 22, 'ray', 'tailscale_ssh', ?, ?)`,
+  )
+    .bind(memberId, now, now)
     .run();
 }
 

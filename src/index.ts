@@ -13,6 +13,7 @@ import {
   refreshIdentity,
   removeIdentity,
 } from "./members";
+import { syncHosts } from "./host-sync";
 import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
 import { authenticate, issueTokens, revokeRefreshToken, rotateRefreshToken } from "./tokens";
 
@@ -59,6 +60,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       const signedTransaction = requireString(await readJson(request), "signedTransaction");
       return json({ subscription: await submitAppStoreTransaction(env, memberId, signedTransaction) });
     }
+    case "POST /v1/members/me/hosts/sync":
+      return json(await syncHosts(env, await authenticate(env, request), request));
     case "POST /v1/app-store/notifications":
       await handleAppStoreNotification(env, requireString(await readJson(request), "signedPayload"));
       return json({ received: true });

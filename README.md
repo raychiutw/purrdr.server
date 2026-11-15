@@ -1,6 +1,6 @@
 # Purrdr 後台
 
-Cloudflare Worker + D1(ADR-0004、ADR-0007、ADR-0009)。負責會員登入、訂閱權限、推播轉送與主機同步;聊天與終端機不經過這裡。目前有會員(#27)與訂閱權限(#28);推播(#29)、主機同步(#30)之後加。
+Cloudflare Worker + D1(ADR-0004、ADR-0007、ADR-0009)。負責會員登入、訂閱權限、推播轉送與主機同步;聊天與終端機不經過這裡。目前有會員(#27)、訂閱權限(#28)與主機同步(#30);推播(#29)另行合併。
 
 ## 指令
 
@@ -35,11 +35,17 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `DELETE /v1/members/me` | 存取權杖 | 刪除會員。回 204 |
 | `GET /v1/members/me/subscription` | 存取權杖 | 回 `{ subscription }`;從沒訂閱過是 `null` |
 | `POST /v1/members/me/subscription/app-store` | 存取權杖 | 提交 StoreKit 2 交易。body `{ signedTransaction }`(`VerificationResult.jwsRepresentation`)。回 `{ subscription }` |
+| `POST /v1/members/me/hosts/sync` | 存取權杖 | 主機同步(要有效的 Purrdr Plus)。body `{ changes: [...] }`,回 `{ hosts: [...], deletedHostIds: [...] }`,見下方「主機同步」 |
 | `POST /v1/app-store/notifications` | — | App Store Server Notifications v2 的 webhook。body `{ signedPayload }`,處理完回 200 `{ received: true }` |
 
 `member` 的形狀:`{ id, identities: [{ provider, email, linkedAt }] }`(email 可能是 Apple private relay,也可能是 `null`)。
 
 `subscription` 的形狀:`{ status, store, productId, expiresAt, gracePeriodExpiresAt, willAutoRenew }`。`status` 是 `active`、`in_grace_period`(扣款失敗、Apple 重試中，仍有權限)、`expired`、`revoked`(退款或撤銷);`store` 是 `app_store`／`google_play`;`willAutoRenew` 在還沒收過續訂資訊時是 `null`。會員有多個訂閱時回有效的那個，其次是最晚到期的。
+
+`changes` 的每一筆是修改(新增也是)`{ id, name, address, port, username, connectionMethod, hostKeyFingerprint, modifiedAt }`
+或刪除 `{ id, deleted: true }`;回應的 `hosts` 每一筆是同樣的修改形狀，依 `id` 排序。`id` 是 app 產生的 UUID(後台一律回小寫);
+`connectionMethod` 是 `tailscale_ssh`／`openssh`;`hostKeyFingerprint` 是 `SHA256:` 之後、不補等號的 base64(43 字)或 `null`(還沒確認);
+`modifiedAt` 是這支裝置修改那台主機的時間。
 
 存取權杖放在 `Authorization: Bearer <accessToken>`。
 
@@ -55,7 +61,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | 409 | `provider_already_linked` | 連結時已經有同一種登入方式(每種最多一個) |
 | 400 | `invalid_transaction` | 交易簽章驗不過，或不是這個 app、不是 Purrdr Plus、環境不是 Production／Sandbox(StoreKit 設定檔的交易一律驗不過) |
 | 400 | `invalid_notification` | App Store 通知簽章驗不過，或 bundle id、環境、app Apple ID 不對 |
-| 403 | `subscription_required` | (#29、#30 用)需要有效的 Purrdr Plus |
+| 403 | `subscription_required` | 需要有效的 Purrdr Plus(主機同步;#29 推播) |
 | 409 | `identity_in_use` | 要連結的身分屬於另一個有訂閱或同步資料的會員 |
 | 409 | `subscription_in_use` | 這個 App Store 訂閱已屬於另一個會員 |
 | 409 | `last_identity` | 解除最後一種登入方式 |
@@ -72,12 +78,19 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 - **訂閱歸屬**:一個 App Store 訂閱(original transaction)只屬於一個會員。已登記的只屬於原會員;`appAccountToken` 是另一個現有會員時不能被領走(409 `subscription_in_use`);沒有 `appAccountToken`(在 App Store 兌換 Offer Code)或原會員已刪除時，歸提交的會員。
 - **通知**:不依通知類型個別處理，而是寫入通知裡的交易與續訂資訊：續訂帶新的到期時間、到期的時間已過、退款與撤銷帶 `revocationDate`、撤銷被取消時不帶。較晚購買的交易取代舊的;同一筆交易只接受簽章時間不早於現有的;續訂資訊也依簽章時間，晚到的舊通知不會蓋掉新狀態。沒登記且 `appAccountToken` 不是現有會員的訂閱略過(回 200)。
 - **權限判定**:沒有 `revoked_at`,且到期時間或帳單寬限期還沒過。推播與主機同步用 `src/subscriptions.ts` 的 `hasActiveSubscription`／`requireActiveSubscription`(403 `subscription_required`)。
-- **合併規則**:會員只要有 `entitlements` 列(不論是否過期)就不是空會員。
+- **合併規則**:會員只要有 `entitlements` 列(不論是否過期)或 `synced_hosts` 列(含刪除紀錄)就不是空會員。
+- **主機同步**(#30、ADR-0007):
+  - 要有效的 Purrdr Plus,讀取也是;到期後資料保留(續訂後接著用),刪除會員時一起刪。
+  - 以單一主機為單位**最後修改者勝**:比 `modifiedAt`,比已存的新才取代，一樣新時保留已存的;回應永遠是套用後的整份清單，app 以它為準。
+    `modifiedAt` 晚於後台收到的時間(裝置時鐘跑到未來)時以後台時間為準，避免那支裝置永遠贏。
+  - **刪除留紀錄**:欄位清空，只留 id 與刪除時間，列在 `deletedHostIds`;之後同一個 id 的上傳一律忽略(即使修改時間較晚),還沒同步到刪除的裝置傳不回來。
+  - **只收白名單欄位**:修改與刪除各自的欄位以外，多一個欄位(例如 `password`、`privateKey`、`authentication`)整個請求 400 `invalid_request`、什麼都不存。
+    私鑰、密碼、passphrase、登入方式、herdr 路徑與 session、作業系統都不上傳。一次最多 200 筆;任何一筆不合法，整個請求不動資料。
 - **刪除會員**:先撤銷 Sign in with Apple 權杖(Apple 回 200 或 400 都算完成),成功才刪資料;刪除靠 foreign key 的 `ON DELETE CASCADE`。Apple 訂閱不會因此取消，由 app 提醒使用者自行取消。
 
 ## 資料表
 
-見 `migrations/`。`members`、`identities`、`refresh_tokens` 是 #27 的;`entitlements`(訂閱權限)是 #28 的;`synced_hosts` 是給合併規則用的最小骨架，欄位由 #30 決定(上線前可直接改寫 `0002`)。之後新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`。
+見 `migrations/`。`members`、`identities`、`refresh_tokens` 是 #27 的;`entitlements`(訂閱權限)是 #28 的;`synced_hosts`(主機同步)是 #30 的。之後新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`。
 
 ## 上線前要填的東西
 
@@ -102,5 +115,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | Google client ID(app 端) | app 的 `src/App/Purrdr/BackendConfiguration.swift` | 同上面的 iOS OAuth client ID |
 
 `APPLE_TEAM_ID`(`8Z6WVFJ574`)與 `APPLE_CLIENT_ID`(bundle id)已是真值。隱私權政策要寫明：後台保存登入身分的 subject 與 email(可能是 Apple 轉寄地址)、Sign in with Apple refresh token(只用於撤銷)、訂閱紀錄(App Store 的 original transaction ID、商品、購買與到期時間、退款或撤銷時間、自動續訂狀態)。
+會員開啟主機同步時，另保存每台主機的名稱、位址與埠、使用者名稱、連線方式(Tailscale SSH／OpenSSH)、host key 指紋與修改時間，
+以及已刪除主機的 id 與刪除時間;後台可讀(TLS 傳輸、Cloudflare 靜態加密，不做端對端加密)。私鑰、密碼、passphrase 永不上傳。刪除會員時一併刪除。
 
 沒有使用 App Store Server API,所以不需要 In-App Purchase key(`.p8`):權限只靠 app 提交的簽章交易與 App Store Server Notifications。之後若要主動查狀態或補抓漏掉的通知(Get All Subscription Statuses、Get Notification History),再新增金鑰與 secret。
