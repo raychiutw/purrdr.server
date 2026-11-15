@@ -8,5 +8,7 @@ declare namespace Cloudflare {
     TEST_GOOGLE_ID_TOKEN_KEY: string;
     /** 測試用 Sign in with Apple 私鑰的公鑰(JWK JSON),假 Apple token 端點用來驗 client secret。 */
     TEST_APPLE_CLIENT_SECRET_PUBLIC_JWK: string;
+    /** 測試用 App Store 根憑證的私鑰(JWK JSON);公開的憑證在 `APPLE_ROOT_CERTIFICATES`。 */
+    TEST_APP_STORE_ROOT_KEY: string;
   }
 }

@@ -23,7 +23,12 @@
     // Sign in with Apple 私鑰(.p8)的 Key ID。
     "APPLE_KEY_ID": "REPLACE_ME_APPLE_KEY_ID",
     // 接受的 Google OAuth client ID(ID token 的 aud),逗號分隔。iOS 一個，之後 Android 再加。
-    "GOOGLE_CLIENT_IDS": "REPLACE_ME.apps.googleusercontent.com"
+    "GOOGLE_CLIENT_IDS": "REPLACE_ME.apps.googleusercontent.com",
+    // 信任的 App Store 簽章根憑證(DER 的 base64,逗號分隔)= Apple Root CA - G3。
+    // StoreKit 交易與 App Store Server Notifications 的 JWS 憑證鏈最上層必須跟這裡的某一張逐位元組相同。
+    "APPLE_ROOT_CERTIFICATES": "REPLACE_ME_APPLE_ROOT_CA_G3_BASE64",
+    // App Store Connect 的 Apple ID(數字);只檢查 Production 環境的通知。
+    "APP_STORE_APP_APPLE_ID": "REPLACE_ME_APP_APPLE_ID"
   },
   // Secrets:值不寫在這裡，用 `wrangler secret put <名稱>` 設定。
   //   APPLE_PRIVATE_KEY    Sign in with Apple 私鑰 .p8 的 PEM 全文(PKCS#8)

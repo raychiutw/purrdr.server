@@ -21,10 +21,15 @@ async function count(table: string): Promise<number> {
   return row?.count ?? 0;
 }
 
-/// 讓會員有訂閱權限(#28 才會有正式的寫入路徑)。
+/// 讓會員有訂閱權限(正式路徑見 subscription.test.ts;這裡直接寫入，專心測合併規則)。
 async function giveSubscription(memberId: string) {
-  await env.DB.prepare("INSERT INTO entitlements (member_id, store, product_id, expires_at, updated_at) VALUES (?, 'app_store', 'plus.monthly', ?, ?)")
-    .bind(memberId, Date.now() + 86_400_000, Date.now())
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO entitlements (store, original_transaction_id, member_id, environment, product_id, transaction_id,
+       purchased_at, expires_at, transaction_signed_at, updated_at)
+     VALUES ('app_store', ?, ?, 'Sandbox', 'com.raychiu.purrdr.plus.monthly', '1', ?, ?, ?, ?)`,
+  )
+    .bind(`original-${memberId}`, memberId, now, now + 86_400_000, now, now)
     .run();
 }
 

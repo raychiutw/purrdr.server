@@ -13,6 +13,7 @@ import {
   refreshIdentity,
   removeIdentity,
 } from "./members";
+import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
 import { authenticate, issueTokens, revokeRefreshToken, rotateRefreshToken } from "./tokens";
 
 /// Purrdr 後台(ADR-0004、ADR-0007)。API 一覽見 README.md。
@@ -51,6 +52,16 @@ async function route(request: Request, env: Env): Promise<Response> {
       return unlinkIdentity(request, env, "apple");
     case "DELETE /v1/members/me/identities/google":
       return unlinkIdentity(request, env, "google");
+    case "GET /v1/members/me/subscription":
+      return json({ subscription: await subscriptionView(env, await authenticate(env, request)) });
+    case "POST /v1/members/me/subscription/app-store": {
+      const memberId = await authenticate(env, request);
+      const signedTransaction = requireString(await readJson(request), "signedTransaction");
+      return json({ subscription: await submitAppStoreTransaction(env, memberId, signedTransaction) });
+    }
+    case "POST /v1/app-store/notifications":
+      await handleAppStoreNotification(env, requireString(await readJson(request), "signedPayload"));
+      return json({ received: true });
     default:
       throw new ApiError(404, "not_found", "Not found.");
   }
