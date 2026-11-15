@@ -1,0 +1,32 @@
+// Purrdr 後台(ADR-0004、ADR-0007、ADR-0009)。
+// 標成 REPLACE_ME 的值上線前要換成真值，清單見 README.md「上線前要填的東西」。
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "purrdr-backend",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "purrdr",
+      "database_id": "REPLACE_ME_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // Sign in with Apple 的 client_id:原生 app 就是 bundle id(ID token 的 aud)。
+    "APPLE_CLIENT_ID": "com.raychiu.purrdr",
+    // Apple Developer Team ID(與 Xcode 專案的 DEVELOPMENT_TEAM 相同)。
+    "APPLE_TEAM_ID": "8Z6WVFJ574",
+    // Sign in with Apple 私鑰(.p8)的 Key ID。
+    "APPLE_KEY_ID": "REPLACE_ME_APPLE_KEY_ID",
+    // 接受的 Google OAuth client ID(ID token 的 aud),逗號分隔。iOS 一個，之後 Android 再加。
+    "GOOGLE_CLIENT_IDS": "REPLACE_ME.apps.googleusercontent.com"
+  },
+  // Secrets:值不寫在這裡，用 `wrangler secret put <名稱>` 設定。
+  //   APPLE_PRIVATE_KEY    Sign in with Apple 私鑰 .p8 的 PEM 全文(PKCS#8)
+  //   ACCESS_TOKEN_SECRET  簽存取權杖(HS256)的隨機密鑰，至少 32 bytes
+  "secrets": { "required": ["APPLE_PRIVATE_KEY", "ACCESS_TOKEN_SECRET"] }
+}

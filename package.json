@@ -1,0 +1,20 @@
+{
+  "name": "purrdr-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "wrangler types --strict-vars=false --check && tsc --noEmit",
+    "types": "wrangler types --strict-vars=false",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "jose": "6.2.15"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "typescript": "5.9.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.156.0"
+  }
+}

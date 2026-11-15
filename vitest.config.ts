@@ -1,0 +1,48 @@
+import { generateKeyPairSync, randomBytes } from "node:crypto";
+import path from "node:path";
+import { cloudflareTest, readD1Migrations } from "@cloudflare/vitest-plugin";
+import { defineConfig } from "vitest/config";
+
+/// 測試用金鑰：每次執行重新產生，絕不使用真的 Apple／Google 金鑰。
+/// - Apple 與 Google 的 ID token 用各自的 RSA 金鑰簽，測試再假裝成兩家的 JWKS 端點提供公鑰。
+/// - Sign in with Apple 的 .p8 私鑰換成自產的 P-256 金鑰;假的 Apple token 端點用公鑰驗證 client secret。
+function testKeys() {
+  const rsa = () => generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ format: "jwk" });
+  const p8 = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  return {
+    appleIdTokenKey: JSON.stringify(rsa()),
+    googleIdTokenKey: JSON.stringify(rsa()),
+    applePrivateKey: p8.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+    applePublicJwk: JSON.stringify(p8.publicKey.export({ format: "jwk" })),
+  };
+}
+
+export default defineConfig({
+  plugins: [
+    cloudflareTest(async () => {
+      const keys = testKeys();
+      const accessTokenSecret = randomBytes(32).toString("base64url");
+      // wrangler 會檢查 wrangler.jsonc 宣告的必要 secrets;測試值放進 process.env,免得每次都警告。
+      process.env.APPLE_PRIVATE_KEY = keys.applePrivateKey;
+      process.env.ACCESS_TOKEN_SECRET = accessTokenSecret;
+      return {
+        wrangler: { configPath: "./wrangler.jsonc" },
+        miniflare: {
+          bindings: {
+            TEST_MIGRATIONS: await readD1Migrations(path.join(import.meta.dirname, "migrations")),
+            APPLE_KEY_ID: "TESTKEY123",
+            GOOGLE_CLIENT_IDS: "test-ios.apps.googleusercontent.com,test-android.apps.googleusercontent.com",
+            APPLE_PRIVATE_KEY: keys.applePrivateKey,
+            ACCESS_TOKEN_SECRET: accessTokenSecret,
+            TEST_APPLE_ID_TOKEN_KEY: keys.appleIdTokenKey,
+            TEST_GOOGLE_ID_TOKEN_KEY: keys.googleIdTokenKey,
+            TEST_APPLE_CLIENT_SECRET_PUBLIC_JWK: keys.applePublicJwk,
+          },
+        },
+      };
+    }),
+  ],
+  test: {
+    setupFiles: ["./test/setup.ts"],
+  },
+});
