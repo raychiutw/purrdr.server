@@ -27,8 +27,8 @@
     // 信任的 App Store 簽章根憑證(DER 的 base64,逗號分隔)= Apple Root CA - G3。
     // StoreKit 交易與 App Store Server Notifications 的 JWS 憑證鏈最上層必須跟這裡的某一張逐位元組相同。
     "APPLE_ROOT_CERTIFICATES": "REPLACE_ME_APPLE_ROOT_CA_G3_BASE64",
-    // App Store Connect 的 Apple ID(數字);只檢查 Production 環境的通知。
-    "APP_STORE_APP_APPLE_ID": "REPLACE_ME_APP_APPLE_ID",
+    // App Store Connect 的 Apple ID(數字，與 app 的 PurrdrLinks.appStoreID 相同);只檢查 Production 環境的通知。
+    "APP_STORE_APP_APPLE_ID": "6835416115",
     // APNs 驗證金鑰(.p8)的 Key ID(推播轉送，#29)。Team ID 沿用 APPLE_TEAM_ID,topic 是 APPLE_CLIENT_ID(bundle id)。
     "APNS_KEY_ID": "REPLACE_ME_APNS_KEY_ID"
   },
