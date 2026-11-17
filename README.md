@@ -47,8 +47,13 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 
 `changes` 的每一筆是修改(新增也是)`{ id, name, address, port, username, connectionMethod, hostKeyFingerprint, modifiedAt }`
 或刪除 `{ id, deleted: true }`;回應的 `hosts` 每一筆是同樣的修改形狀，依 `id` 排序。`id` 是 app 產生的 UUID(後台一律回小寫);
-`connectionMethod` 是 `tailscale_ssh`／`openssh`;`hostKeyFingerprint` 是 `SHA256:` 之後、不補等號的 base64(43 字)或 `null`(還沒確認);
+`connectionMethod` 是 `tailscale_ssh`／`openssh`／`https`;`hostKeyFingerprint` 是 `SHA256:` 之後、不補等號的 base64(43 字)或 `null`(還沒確認);
 `modifiedAt` 是這支裝置修改那台主機的時間。
+
+**HTTPS 主機**(#63):多一個 `hostServiceAddress`(主機服務位址，例如 `https://studio.tail1234.ts.net`;只有 scheme、主機與埠，
+本機測試的 `http://127.0.0.1:<埠>` 也收),`address`／`port` 是它的主機名稱與埠、`username` 是空字串、`hostKeyFingerprint` 是 `null`;
+SSH 主機不帶 `hostServiceAddress`。裝置權杖不在白名單。body 可帶 `connectionMethods: [...]`(這支 app 看得懂的連線方式);
+**沒帶的是舊版 app,回應不含 HTTPS 主機**(舊版遇到不認得的連線方式會整個同步失敗),刪除紀錄照常給。後台要先於支援 HTTPS 的 app 上線。
 
 存取權杖放在 `Authorization: Bearer <accessToken>`。
 
@@ -94,8 +99,8 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
   - 以單一主機為單位**最後修改者勝**:比 `modifiedAt`,比已存的新才取代，一樣新時保留已存的;回應永遠是套用後的整份清單，app 以它為準。
     `modifiedAt` 晚於後台收到的時間(裝置時鐘跑到未來)時以後台時間為準，避免那支裝置永遠贏。
   - **刪除留紀錄**:欄位清空，只留 id 與刪除時間，列在 `deletedHostIds`;之後同一個 id 的上傳一律忽略(即使修改時間較晚),還沒同步到刪除的裝置傳不回來。
-  - **只收白名單欄位**:修改與刪除各自的欄位以外，多一個欄位(例如 `password`、`privateKey`、`authentication`)整個請求 400 `invalid_request`、什麼都不存。
-    私鑰、密碼、passphrase、登入方式、herdr 路徑與 session、作業系統都不上傳。一次最多 200 筆;任何一筆不合法，整個請求不動資料。
+  - **只收白名單欄位**:修改與刪除各自的欄位以外，多一個欄位(例如 `password`、`privateKey`、`authentication`、`deviceToken`)整個請求 400 `invalid_request`、什麼都不存。
+    私鑰、密碼、passphrase、裝置權杖、登入方式、herdr 路徑與 session、作業系統都不上傳。一次最多 200 筆;任何一筆不合法，整個請求不動資料。
 - **刪除會員**:先撤銷 Sign in with Apple 權杖(Apple 回 200 或 400 都算完成),成功才刪資料;刪除靠 foreign key 的 `ON DELETE CASCADE`。Apple 訂閱不會因此取消，由 app 提醒使用者自行取消。
 
 ## 資料表
@@ -129,7 +134,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | Google client ID(app 端) | app 的 `src/App/Purrdr/BackendConfiguration.swift` | 同上面的 iOS OAuth client ID |
 
 `APPLE_TEAM_ID`(`8Z6WVFJ574`)、`APPLE_CLIENT_ID`(bundle id)與 `APP_STORE_APP_APPLE_ID`(`6835416115`)已是真值。隱私權政策要寫明：後台保存登入身分的 subject 與 email(可能是 Apple 轉寄地址)、Sign in with Apple refresh token(只用於撤銷)、訂閱紀錄(App Store 的 original transaction ID、商品、購買與到期時間、退款或撤銷時間、自動續訂狀態)、推播配對(配對密鑰的雜湊、APNs device token 與環境);推播經過後台時只有 workspace 名稱、狀態與 pane id,後台不保存。
-會員開啟主機同步時，另保存每台主機的名稱、位址與埠、使用者名稱、連線方式(Tailscale SSH／OpenSSH)、host key 指紋與修改時間，
-以及已刪除主機的 id 與刪除時間;後台可讀(TLS 傳輸、Cloudflare 靜態加密，不做端對端加密)。私鑰、密碼、passphrase 永不上傳。刪除會員時一併刪除。
+會員開啟主機同步時，另保存每台主機的名稱、位址與埠、使用者名稱、連線方式(Tailscale SSH／OpenSSH／HTTPS)、host key 指紋、HTTPS 主機的主機服務位址與修改時間，
+以及已刪除主機的 id 與刪除時間;後台可讀(TLS 傳輸、Cloudflare 靜態加密，不做端對端加密)。私鑰、密碼、passphrase、裝置權杖永不上傳。刪除會員時一併刪除。
 
 沒有使用 App Store Server API,所以不需要 In-App Purchase key(`.p8`):權限只靠 app 提交的簽章交易與 App Store Server Notifications。之後若要主動查狀態或補抓漏掉的通知(Get All Subscription Statuses、Get Notification History),再新增金鑰與 secret。
