@@ -259,3 +259,132 @@ describe("欄位檢查", () => {
     expect(response.status).toBe(400);
   });
 });
+
+describe("HTTPS 主機(#63):同步主機服務位址，裝置權杖永不上傳", () => {
+  const HTTPS_ID = "1d2e3f40-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
+
+  function httpsStudio(overrides: Record<string, unknown> = {}) {
+    return {
+      id: HTTPS_ID,
+      name: "Studio HTTPS",
+      address: "studio.tail1234.ts.net",
+      port: 443,
+      username: "",
+      connectionMethod: "https",
+      hostKeyFingerprint: null,
+      hostServiceAddress: "https://studio.tail1234.ts.net",
+      modifiedAt: "2026-11-01T08:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  function syncSupportingHttps(accessToken: string, changes: unknown[]) {
+    return api("POST", "/v1/members/me/hosts/sync", {
+      accessToken,
+      body: { changes, connectionMethods: ["tailscale_ssh", "openssh", "https"] },
+    });
+  }
+
+  it("支援 HTTPS 的裝置上傳 HTTPS 主機，另一支支援 HTTPS 的裝置拿到同樣的欄位", async () => {
+    const me = await subscriber();
+
+    const upload = await syncSupportingHttps(me.accessToken, [httpsStudio(), studio()]);
+    expect(upload.status).toBe(200);
+
+    const otherDevice = await syncSupportingHttps(me.accessToken, []);
+    expect(otherDevice.body).toEqual({ hosts: [httpsStudio(), studio()], deletedHostIds: [] });
+  });
+
+  it("舊版 app(請求沒有 connectionMethods)看不到 HTTPS 主機，SSH 主機照舊", async () => {
+    const me = await subscriber();
+    await syncSupportingHttps(me.accessToken, [httpsStudio(), studio()]);
+
+    const oldApp = await sync(me.accessToken, []);
+
+    expect(oldApp.status).toBe(200);
+    expect(oldApp.body).toEqual({ hosts: [studio()], deletedHostIds: [] });
+  });
+
+  it("HTTPS 主機刪除後，刪除紀錄照常給所有裝置", async () => {
+    const me = await subscriber();
+    await syncSupportingHttps(me.accessToken, [httpsStudio()]);
+    await syncSupportingHttps(me.accessToken, [{ id: HTTPS_ID, deleted: true }]);
+
+    const oldApp = await sync(me.accessToken, []);
+
+    expect(oldApp.body).toEqual({ hosts: [], deletedHostIds: [HTTPS_ID] });
+  });
+
+  it.each([
+    ["deviceToken", { deviceToken: "purrdr-device-token-1" }],
+    ["token", { token: "purrdr-device-token-1" }],
+    ["pairingCode", { pairingCode: "K7QM-2XPA" }],
+  ])("HTTPS 主機帶了 %s 欄位：整個請求 400,什麼都不存", async (_, extra) => {
+    const me = await subscriber();
+
+    const response = await syncSupportingHttps(me.accessToken, [httpsStudio(extra)]);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("invalid_request");
+    const { results } = await env.DB.prepare("SELECT * FROM synced_hosts").all();
+    expect(results).toEqual([]);
+  });
+
+  it.each([
+    ["缺主機服務位址", { hostServiceAddress: undefined }],
+    ["主機服務位址不是 https", { hostServiceAddress: "http://studio.tail1234.ts.net" }],
+    ["主機服務位址帶路徑", { hostServiceAddress: "https://studio.tail1234.ts.net/v1/ws" }],
+    ["主機服務位址帶帳密", { hostServiceAddress: "https://user:pass@studio.tail1234.ts.net" }],
+    ["主機服務位址帶 query", { hostServiceAddress: "https://studio.tail1234.ts.net/?token=abc" }],
+    ["主機服務位址太長", { hostServiceAddress: `https://${"a".repeat(300)}.ts.net` }],
+    ["HTTPS 主機帶 host key 指紋", { hostKeyFingerprint: "nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8" }],
+  ])("%s:400", async (_, overrides) => {
+    const me = await subscriber();
+
+    const response = await syncSupportingHttps(me.accessToken, [httpsStudio(overrides)]);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("invalid_request");
+  });
+
+  it("本機測試用的 http://127.0.0.1 位址也收(app 接受的位址都要收，否則整個同步失敗)", async () => {
+    const me = await subscriber();
+    const local = httpsStudio({ address: "127.0.0.1", port: 47820, hostServiceAddress: "http://127.0.0.1:47820" });
+
+    const response = await syncSupportingHttps(me.accessToken, [local]);
+
+    expect(response.status).toBe(200);
+    expect(response.body.hosts).toEqual([local]);
+  });
+
+  it("SSH 主機不收主機服務位址", async () => {
+    const me = await subscriber();
+
+    const response = await syncSupportingHttps(me.accessToken, [studio({ hostServiceAddress: "https://studio.tail1234.ts.net" })]);
+
+    expect(response.status).toBe(400);
+  });
+
+  it("connectionMethods 不是字串陣列：400", async () => {
+    const me = await subscriber();
+
+    const response = await api("POST", "/v1/members/me/hosts/sync", {
+      accessToken: me.accessToken,
+      body: { changes: [], connectionMethods: "https" },
+    });
+
+    expect(response.status).toBe(400);
+  });
+
+  it("舊版 app 把 HTTPS 主機改成 SSH(較新的修改)時取代，之後兩種 app 都看到 SSH 版本", async () => {
+    const me = await subscriber();
+    await syncSupportingHttps(me.accessToken, [httpsStudio()]);
+    const asSSH = studio({ id: HTTPS_ID, modifiedAt: "2026-11-02T08:00:00.000Z" });
+
+    const oldApp = await sync(me.accessToken, [asSSH]);
+
+    expect(oldApp.body.hosts).toEqual([asSSH]);
+    const newApp = await syncSupportingHttps(me.accessToken, []);
+    expect(newApp.body.hosts).toEqual([asSSH]);
+  });
+});
