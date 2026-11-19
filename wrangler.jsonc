@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "purrdr",
-      "database_id": "REPLACE_ME_D1_DATABASE_ID",
+      "database_id": "2e93b236-6636-447e-b8e5-22ead8f6909b",
       "migrations_dir": "migrations"
     }
   ],
@@ -26,7 +26,7 @@
     "GOOGLE_CLIENT_IDS": "REPLACE_ME.apps.googleusercontent.com",
     // 信任的 App Store 簽章根憑證(DER 的 base64,逗號分隔)= Apple Root CA - G3。
     // StoreKit 交易與 App Store Server Notifications 的 JWS 憑證鏈最上層必須跟這裡的某一張逐位元組相同。
-    "APPLE_ROOT_CERTIFICATES": "REPLACE_ME_APPLE_ROOT_CA_G3_BASE64",
+    "APPLE_ROOT_CERTIFICATES": "MIICQzCCAcmgAwIBAgIILcX8iNLFS5UwCgYIKoZIzj0EAwMwZzEbMBkGA1UEAwwSQXBwbGUgUm9vdCBDQSAtIEczMSYwJAYDVQQLDB1BcHBsZSBDZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTETMBEGA1UECgwKQXBwbGUgSW5jLjELMAkGA1UEBhMCVVMwHhcNMTQwNDMwMTgxOTA2WhcNMzkwNDMwMTgxOTA2WjBnMRswGQYDVQQDDBJBcHBsZSBSb290IENBIC0gRzMxJjAkBgNVBAsMHUFwcGxlIENlcnRpZmljYXRpb24gQXV0aG9yaXR5MRMwEQYDVQQKDApBcHBsZSBJbmMuMQswCQYDVQQGEwJVUzB2MBAGByqGSM49AgEGBSuBBAAiA2IABJjpLz1AcqTtkyJygRMc3RCV8cWjTnHcFBbZDuWmBSp3ZHtfTjjTuxxEtX/1H7YyYl3J6YRbTzBPEVoA/VhYDKX1DyxNB0cTddqXl5dvMVztK517IDvYuVTZXpmkOlEKMaNCMEAwHQYDVR0OBBYEFLuw3qFYM4iapIqZ3r6966/ayySrMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMAoGCCqGSM49BAMDA2gAMGUCMQCD6cHEFl4aXTQY2e3v9GwOAEZLuN+yRhHFD/3meoyhpmvOwgPUnPWTxnS4at+qIxUCMG1mihDK1A3UT82NQz60imOlM27jbdoXt2QfyFMm+YhidDkLF1vLUagM6BgD56KyKA==",
     // App Store Connect 的 Apple ID(數字，與 app 的 PurrdrLinks.appStoreID 相同);只檢查 Production 環境的通知。
     "APP_STORE_APP_APPLE_ID": "6835416115",
     // APNs 驗證金鑰(.p8)的 Key ID(推播轉送，#29)。Team ID 沿用 APPLE_TEAM_ID,topic 是 APPLE_CLIENT_ID(bundle id)。
