@@ -387,4 +387,90 @@ describe("HTTPS 主機(#63):同步主機服務位址，裝置權杖永不上傳"
     const newApp = await syncSupportingHttps(me.accessToken, []);
     expect(newApp.body.hosts).toEqual([asSSH]);
   });
+
+  it("HTTPS 主機也帶主機圖示(#243)", async () => {
+    const me = await subscriber();
+
+    const response = await syncSupportingHttps(me.accessToken, [httpsStudio({ icon: "cloud" })]);
+
+    expect(response.body.hosts).toEqual([httpsStudio({ icon: "cloud" })]);
+  });
+});
+
+describe("主機圖示(#243):跟著主機同步;舊版 app 不帶圖示時保留已存的", () => {
+  it("新版 app 上傳的圖示，另一支裝置同步時拿到", async () => {
+    const me = await subscriber();
+    await sync(me.accessToken, [studio({ icon: "macMini" })]);
+
+    const otherDevice = await sync(me.accessToken, []);
+
+    expect(otherDevice.body.hosts).toEqual([studio({ icon: "macMini" })]);
+  });
+
+  it("「無」也同步(存成 none)", async () => {
+    const me = await subscriber();
+
+    const response = await sync(me.accessToken, [studio({ icon: "none" })]);
+
+    expect(response.body.hosts).toEqual([studio({ icon: "none" })]);
+  });
+
+  it("沒有圖示的主機(舊版 app 上傳)回應不帶 icon 欄位", async () => {
+    const me = await subscriber();
+
+    const response = await sync(me.accessToken, [studio()]);
+
+    expect(response.body.hosts[0]).not.toHaveProperty("icon");
+  });
+
+  it("舊版 app 修改主機(沒帶圖示)時不清掉新版 app 設的圖示", async () => {
+    const me = await subscriber();
+    await sync(me.accessToken, [studio({ icon: "rack" })]);
+
+    const response = await sync(me.accessToken, [studio({ name: "Renamed on old app", modifiedAt: "2026-11-02T08:00:00.000Z" })]);
+
+    expect(response.body.hosts).toEqual([studio({ name: "Renamed on old app", modifiedAt: "2026-11-02T08:00:00.000Z", icon: "rack" })]);
+  });
+
+  it("較新的修改換掉圖示;較舊的修改不換", async () => {
+    const me = await subscriber();
+    await sync(me.accessToken, [studio({ icon: "rack", modifiedAt: "2026-11-02T08:00:00.000Z" })]);
+
+    await sync(me.accessToken, [studio({ icon: "cloud", modifiedAt: "2026-11-01T08:00:00.000Z" })]);
+    const response = await sync(me.accessToken, [studio({ icon: "laptop", modifiedAt: "2026-11-03T08:00:00.000Z" })]);
+
+    expect(response.body.hosts).toEqual([studio({ icon: "laptop", modifiedAt: "2026-11-03T08:00:00.000Z" })]);
+  });
+
+  it("較新版 app 加的圖示(後台不認得名稱)照樣存、照樣回，由 app 決定怎麼顯示", async () => {
+    const me = await subscriber();
+
+    const response = await sync(me.accessToken, [studio({ icon: "robotArm" })]);
+
+    expect(response.body.hosts).toEqual([studio({ icon: "robotArm" })]);
+  });
+
+  it("刪除時圖示一起清掉", async () => {
+    const me = await subscriber();
+    await sync(me.accessToken, [studio({ icon: "rack" })]);
+
+    await sync(me.accessToken, [{ id: STUDIO_ID, deleted: true }]);
+
+    const row = await env.DB.prepare("SELECT icon FROM synced_hosts WHERE host_id = ?").bind(STUDIO_ID).first();
+    expect(row).toEqual({ icon: null });
+  });
+
+  it.each([
+    ["不是字串", 3],
+    ["空字串", ""],
+    ["太長", "a".repeat(33)],
+    ["有空白", "mac mini"],
+  ])("圖示%s:400", async (_, icon) => {
+    const me = await subscriber();
+
+    const response = await sync(me.accessToken, [studio({ icon })]);
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("invalid_request");
+  });
 });
