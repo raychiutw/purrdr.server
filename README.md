@@ -1,11 +1,10 @@
 # Purrdr 後台
 
-Cloudflare Worker + D1(ADR-0004、ADR-0007、ADR-0009)。負責會員登入、訂閱權限、推播轉送與主機同步;聊天與終端機不經過這裡。目前有會員(#27)、訂閱權限(#28)、推播轉送(#29)與主機同步(#30)。
+Cloudflare Worker + D1(app repo [`raychiutw/purrdr.ios`](https://github.com/raychiutw/purrdr.ios) 的 ADR-0004、ADR-0007、ADR-0009)。從 app repo 的 `backend/` 抽出(保留歷史),私人 repo。負責會員登入、訂閱權限、推播轉送與主機同步;聊天與終端機不經過這裡。目前有會員(#27)、訂閱權限(#28)、推播轉送(#29)與主機同步(#30)。
 
 ## 指令
 
 ```bash
-cd backend
 npm ci
 npm test            # Workers 本機測試環境(@cloudflare/vitest-plugin + 本機 D1),不連 Cloudflare、不連 Apple／Google
 npm run typecheck   # tsc + 檢查 worker-configuration.d.ts 是否與 wrangler.jsonc 一致
@@ -130,14 +129,14 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 後台網址 | app 的 `src/App/Purrdr/BackendConfiguration.swift` | 部署後的 `https://purrdr-backend.<子網域>.workers.dev` |
 | Apple 根憑證 | `wrangler.jsonc` 的 `APPLE_ROOT_CERTIFICATES` | 從 https://www.apple.com/certificateauthority/ 下載 **Apple Root CA - G3**(`AppleRootCA-G3.cer`,DER),核對 SHA-256 指紋與 Apple 公布的相同後 `base64 -i AppleRootCA-G3.cer \| tr -d '\n'` 填入。不是 secret |
 | App 的 Apple ID | `wrangler.jsonc` 的 `APP_STORE_APP_APPLE_ID`,以及 app 的 `PurrdrLinks.appStoreID`(`src/PurrdrFeatures/PlusView.swift`) | 已填 `6835416115`(App Store Connect → App 資訊 → Apple ID);兩處要相同 |
-| Purrdr Plus 商品 | App Store Connect → 訂閱 | 訂閱群組「Purrdr Plus」,商品 `com.raychiu.purrdr.plus.monthly`(1 個月)、`com.raychiu.purrdr.plus.yearly`(1 年),兩者都有 2 週免費試用(新訂閱者)。價格、顯示名稱與說明要跟 `src/App/Purrdr.storekit` 的意思一致(設定檔的價格只是測試用)。ID 改了要同步 `src/subscriptions.ts` 的 `PLUS_PRODUCT_IDS` 與 app 的 `MemberSubscription.productIDs` |
+| Purrdr Plus 商品 | App Store Connect → 訂閱 | 訂閱群組「Purrdr Plus」,商品 `com.raychiu.purrdr.plus.monthly`(1 個月)、`com.raychiu.purrdr.plus.yearly`(1 年),兩者都有 2 週免費試用(新訂閱者)。價格、顯示名稱與說明要跟 app repo 的 `src/App/Purrdr.storekit` 的意思一致(設定檔的價格只是測試用)。ID 改了要同步 `src/subscriptions.ts` 的 `PLUS_PRODUCT_IDS` 與 app 的 `MemberSubscription.productIDs` |
 | Offer Code | App Store Connect → 訂閱 → 優惠代碼 | 送朋友與活動用;不用自訂授權碼(審查規範 3.1.1) |
 | App Store Server Notifications | App Store Connect → App 資訊 → App Store 伺服器通知 | Production 與 Sandbox 都填 `https://<後台網址>/v1/app-store/notifications`,版本選 **Version 2**;填好後可用 App Store Server API 的「Request a Test Notification」確認(回 TEST 通知) |
 | APNs 驗證金鑰 Key ID | `wrangler.jsonc` 的 `APNS_KEY_ID` | Apple Developer → Keys,建立啟用 Apple Push Notifications service (APNs) 的金鑰(環境選 Sandbox & Production);Team ID 沿用 `APPLE_TEAM_ID` |
 | APNs 私鑰 | secret `APNS_PRIVATE_KEY` | 上一步下載的 `.p8` 全文:`npx wrangler secret put APNS_PRIVATE_KEY < AuthKey_XXXX.p8` |
 | App ID 開推播 | Apple Developer → Identifiers | `com.raychiu.purrdr` 勾選 Push Notifications 與 Time Sensitive Notifications(app 的 entitlement 已加 `aps-environment` 與 time-sensitive) |
-| 主機外掛的公開 repo | GitHub | 主機外掛在公開 repo `raychiutw/purrdr-host` 的 `host-plugin/`(已發佈;herdr 以 `OWNER/REPO/SUBDIR` 安裝 `raychiutw/purrdr-host/host-plugin`);app 的 `PushSettings.pluginSource` 要一致。外掛的後台網址在配對檔裡，由 app 寫入 |
-| 隱私權政策網址 | app 的 `PurrdrLinks.privacyPolicy`(`src/PurrdrFeatures/PlusView.swift`)、App Store Connect | 已是 `https://raychiutw.github.io/purrdr/privacy/`;網頁原始碼在 `docs/site/purrdr/`,要發佈到 `raychiutw.github.io` repo 的 `purrdr/` 資料夾(見 `docs/launch/checklist.md`) |
+| 主機外掛的公開 repo | GitHub | 主機外掛在公開 repo `raychiutw/purrdr.host` 的 `host-plugin/`(已發佈;herdr 以 `OWNER/REPO/SUBDIR` 安裝 `raychiutw/purrdr.host/host-plugin`);app 的 `PushSettings.pluginSource` 要一致。外掛的後台網址在配對檔裡，由 app 寫入 |
+| 隱私權政策網址 | app 的 `PurrdrLinks.privacyPolicy`(`src/PurrdrFeatures/PlusView.swift`)、App Store Connect | 已是 `https://raychiutw.github.io/purrdr/privacy/`;網頁原始碼在 app repo 的 `docs/site/purrdr/`,要發佈到 `raychiutw.github.io` repo 的 `purrdr/` 資料夾(見 app repo 的 `docs/launch/checklist.md`) |
 | 使用條款 | App Store Connect 的 License Agreement | 目前用 Apple 標準 EULA(`PurrdrLinks.termsOfUse`);改用自訂條款時兩邊一起換 |
 | Google client ID(app 端) | app 的 `src/App/Purrdr/BackendConfiguration.swift` | 同上面的 iOS OAuth client ID |
 

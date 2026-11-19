@@ -2,3 +2,9 @@ node_modules/
 .wrangler/
 .dev.vars
 .env
+
+# TDD 紅綠燈的本機紀錄(摘要寫在 commit 或 PR)
+.tdd-logs/
+
+# macOS
+.DS_Store
