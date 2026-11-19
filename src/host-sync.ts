@@ -9,7 +9,8 @@ import { requireActiveSubscription } from "./subscriptions";
 /// - 只收白名單欄位，多一個欄位整個請求 400:私鑰、密碼(或任何不在清單上的東西)進不來。
 /// - 要有效的 Purrdr Plus(讀取也是)。
 /// - HTTPS 主機(#63)只回給請求帶 `connectionMethods` 含 `https` 的 app;舊版 app 看不到，以免整個同步解析失敗。
-/// - 主機圖示(#243)可省略：舊版 app 不帶時保留已存的圖示;沒有圖示的主機回應不帶 `icon`。
+/// - 主機圖示(#243)可省略：不帶時保留已存的圖示;沒有圖示的主機回應不帶 `icon`。
+/// - HTTPS 主機的主機服務位址以 `address`(主機名稱)＋`port` 為唯一來源(#250)。
 
 export type SyncedHostView = {
   id: string;
@@ -19,8 +20,6 @@ export type SyncedHostView = {
   username: string;
   connectionMethod: ConnectionMethod;
   hostKeyFingerprint: string | null;
-  /// 只有 HTTPS 主機有。
-  hostServiceAddress?: string;
   /// 主機圖示(app 的 `HostIcon` 存檔值);沒有圖示資料時省略。
   icon?: string;
   modifiedAt: string;
@@ -36,7 +35,6 @@ type Row = {
   username: string | null;
   connection_method: ConnectionMethod | null;
   host_key_fingerprint: string | null;
-  host_service_address: string | null;
   icon: string | null;
   modified_at: number;
   deleted_at: number | null;
@@ -50,8 +48,7 @@ type Upsert = {
   username: string;
   connectionMethod: ConnectionMethod;
   hostKeyFingerprint: string | null;
-  hostServiceAddress: string | null;
-  /// `null` = 這個請求沒帶(舊版 app),保留已存的。
+  /// `null` = 這個請求沒帶，保留已存的。
   icon: string | null;
   modifiedAt: number;
 };
@@ -93,22 +90,22 @@ function statement(env: Env, memberId: string, change: Change, now: number): D1P
       `INSERT INTO synced_hosts (member_id, host_id, modified_at, deleted_at, updated_at) VALUES (?1, ?2, ?3, ?3, ?3)
        ON CONFLICT (member_id, host_id) DO UPDATE SET
          name = NULL, address = NULL, port = NULL, username = NULL, connection_method = NULL, host_key_fingerprint = NULL,
-         host_service_address = NULL, icon = NULL, modified_at = ?3, deleted_at = ?3, updated_at = ?3
+         icon = NULL, modified_at = ?3, deleted_at = ?3, updated_at = ?3
        WHERE synced_hosts.deleted_at IS NULL`,
     ).bind(memberId, change.id, now);
   }
-  // 最後修改者勝：比已存的新才取代;已刪除的主機不復活。沒帶圖示(舊版 app)時保留已存的。
+  // 最後修改者勝：比已存的新才取代;已刪除的主機不復活。沒帶圖示時保留已存的。
   return env.DB.prepare(
     `INSERT INTO synced_hosts (member_id, host_id, name, address, port, username, connection_method, host_key_fingerprint,
-       modified_at, updated_at, host_service_address, icon)
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+       modified_at, updated_at, icon)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
      ON CONFLICT (member_id, host_id) DO UPDATE SET
        name = ?3, address = ?4, port = ?5, username = ?6, connection_method = ?7, host_key_fingerprint = ?8,
-       modified_at = ?9, updated_at = ?10, host_service_address = ?11, icon = COALESCE(?12, synced_hosts.icon)
+       modified_at = ?9, updated_at = ?10, icon = COALESCE(?11, synced_hosts.icon)
      WHERE synced_hosts.deleted_at IS NULL AND synced_hosts.modified_at < ?9`,
   ).bind(
     memberId, change.id, change.name, change.address, change.port, change.username, change.connectionMethod,
-    change.hostKeyFingerprint, change.modifiedAt, now, change.hostServiceAddress, change.icon,
+    change.hostKeyFingerprint, change.modifiedAt, now, change.icon,
   );
 }
 
@@ -132,7 +129,6 @@ async function hostsOf(env: Env, memberId: string, understood: ReadonlySet<strin
       hostKeyFingerprint: row.host_key_fingerprint,
       modifiedAt: new Date(row.modified_at).toISOString(),
     };
-    if (row.host_service_address !== null) host.hostServiceAddress = row.host_service_address;
     if (row.icon !== null) host.icon = row.icon;
     hosts.push(host);
   }
@@ -148,12 +144,11 @@ const LEGACY_CONNECTION_METHODS: ReadonlySet<string> = new Set(["tailscale_ssh",
 const CONNECTION_METHODS: ReadonlySet<string> = new Set(["tailscale_ssh", "openssh", "https"]);
 /// 主機圖示的存檔值：只檢查形狀，不列舉名稱(較新版 app 加的圖示也要收得下)。
 const ICON = /^[A-Za-z][A-Za-z0-9]{0,31}$/;
+const HOST_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
 /// 欄位白名單：同步內容永遠只有這些(主機名稱、位址與埠、使用者名稱、連線方式、host key 指紋、主機圖示)。
 const UPSERT_FIELDS = ["id", "name", "address", "port", "username", "connectionMethod", "hostKeyFingerprint", "icon", "modifiedAt"];
-/// HTTPS 主機多一個主機服務位址;裝置權杖不在白名單裡。
-const HTTPS_UPSERT_FIELDS = [...UPSERT_FIELDS, "hostServiceAddress"];
 const DELETE_FIELDS = ["id", "deleted"];
 
 function parseChange(value: unknown, now: number): Change {
@@ -167,7 +162,7 @@ function parseChange(value: unknown, now: number): Change {
     return { kind: "delete", id: id.toLowerCase() };
   }
   const isHttps = change.connectionMethod === "https";
-  onlyFields(change, isHttps ? HTTPS_UPSERT_FIELDS : UPSERT_FIELDS);
+  onlyFields(change, UPSERT_FIELDS);
   const port = change.port;
   if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) throw invalid("port must be 1–65535.");
   const method = change.connectionMethod;
@@ -183,13 +178,12 @@ function parseChange(value: unknown, now: number): Change {
     kind: "upsert",
     id: id.toLowerCase(),
     name: text(change, "name", 100),
-    address: text(change, "address", 253),
+    address: isHttps ? hostName(change.address) : text(change, "address", 253),
     port,
     // HTTPS 主機沒有使用者名稱。
     username: isHttps ? emptyUsername(change) : text(change, "username", 64),
     connectionMethod: method as ConnectionMethod,
     hostKeyFingerprint: fingerprint as string | null,
-    hostServiceAddress: isHttps ? hostServiceAddress(change.hostServiceAddress) : null,
     icon: icon(change.icon),
     // 裝置時鐘跑到未來時以後台收到的時間為上限，避免那支裝置的修改永遠贏。
     modifiedAt: Math.min(modifiedAt, now),
@@ -207,20 +201,9 @@ function emptyUsername(change: Record<string, unknown>): string {
   return "";
 }
 
-/// 與 app 的 `HostServiceAddress` 相同：https(本機測試可用 http 的 loopback),只有 scheme、主機與埠。
-function hostServiceAddress(value: unknown): string {
-  const problem = invalid("hostServiceAddress must be an HTTPS address.");
-  if (typeof value !== "string" || value.length > 300 || /[?#]/.test(value)) throw problem;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    throw problem;
-  }
-  const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
-  const schemeAllowed = url.protocol === "https:" || (url.protocol === "http:" && loopback);
-  const onlyOrigin = url.username === "" && url.password === "" && url.pathname === "/";
-  if (!schemeAllowed || !onlyOrigin || url.hostname === "") throw problem;
+/// HTTPS 主機的 address 只能是主機名稱或 IP(scheme 由 app 決定、埠在 port),與 app 的 `HostServiceAddress(host:port:)` 相同。
+function hostName(value: unknown): string {
+  if (typeof value !== "string" || !HOST_NAME.test(value)) throw invalid("HTTPS hosts need a host name in address.");
   return value;
 }
 

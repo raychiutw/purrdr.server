@@ -260,7 +260,7 @@ describe("欄位檢查", () => {
   });
 });
 
-describe("HTTPS 主機(#63):同步主機服務位址，裝置權杖永不上傳", () => {
+describe("HTTPS 主機(#63、#250):以 address＋port 同步主機服務位址，裝置權杖永不上傳", () => {
   const HTTPS_ID = "1d2e3f40-5a6b-4c7d-8e9f-0a1b2c3d4e5f";
 
   function httpsStudio(overrides: Record<string, unknown> = {}) {
@@ -272,7 +272,6 @@ describe("HTTPS 主機(#63):同步主機服務位址，裝置權杖永不上傳"
       username: "",
       connectionMethod: "https",
       hostKeyFingerprint: null,
-      hostServiceAddress: "https://studio.tail1234.ts.net",
       modifiedAt: "2026-11-01T08:00:00.000Z",
       ...overrides,
     };
@@ -331,12 +330,12 @@ describe("HTTPS 主機(#63):同步主機服務位址，裝置權杖永不上傳"
   });
 
   it.each([
-    ["缺主機服務位址", { hostServiceAddress: undefined }],
-    ["主機服務位址不是 https", { hostServiceAddress: "http://studio.tail1234.ts.net" }],
-    ["主機服務位址帶路徑", { hostServiceAddress: "https://studio.tail1234.ts.net/v1/ws" }],
-    ["主機服務位址帶帳密", { hostServiceAddress: "https://user:pass@studio.tail1234.ts.net" }],
-    ["主機服務位址帶 query", { hostServiceAddress: "https://studio.tail1234.ts.net/?token=abc" }],
-    ["主機服務位址太長", { hostServiceAddress: `https://${"a".repeat(300)}.ts.net` }],
+    ["帶了 hostServiceAddress(埠只以 port 為準)", { hostServiceAddress: "https://studio.tail1234.ts.net:8443" }],
+    ["address 帶 scheme", { address: "https://studio.tail1234.ts.net" }],
+    ["address 帶埠", { address: "studio.tail1234.ts.net:8443" }],
+    ["address 帶路徑", { address: "studio.tail1234.ts.net/v1/ws" }],
+    ["address 帶帳密", { address: "user@studio.tail1234.ts.net" }],
+    ["address 帶 query", { address: "studio.tail1234.ts.net?token=abc" }],
     ["HTTPS 主機帶 host key 指紋", { hostKeyFingerprint: "nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8" }],
   ])("%s:400", async (_, overrides) => {
     const me = await subscriber();
@@ -347,9 +346,20 @@ describe("HTTPS 主機(#63):同步主機服務位址，裝置權杖永不上傳"
     expect(response.body.error.code).toBe("invalid_request");
   });
 
-  it("本機測試用的 http://127.0.0.1 位址也收(app 接受的位址都要收，否則整個同步失敗)", async () => {
+  it("HTTPS 主機的埠只在 port:8443 原樣存回，回應沒有 hostServiceAddress", async () => {
     const me = await subscriber();
-    const local = httpsStudio({ address: "127.0.0.1", port: 47820, hostServiceAddress: "http://127.0.0.1:47820" });
+    const custom = httpsStudio({ port: 8443 });
+
+    await syncSupportingHttps(me.accessToken, [custom]);
+    const otherDevice = await syncSupportingHttps(me.accessToken, []);
+
+    expect(otherDevice.body.hosts).toEqual([custom]);
+    expect(otherDevice.body.hosts[0]).not.toHaveProperty("hostServiceAddress");
+  });
+
+  it("本機測試用的 127.0.0.1 位址也收(app 接受的位址都要收，否則整個同步失敗)", async () => {
+    const me = await subscriber();
+    const local = httpsStudio({ address: "127.0.0.1", port: 47820 });
 
     const response = await syncSupportingHttps(me.accessToken, [local]);
 

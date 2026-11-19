@@ -50,19 +50,18 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 `connectionMethod` 是 `tailscale_ssh`／`openssh`／`https`;`hostKeyFingerprint` 是 `SHA256:` 之後、不補等號的 base64(43 字)或 `null`(還沒確認);
 `modifiedAt` 是這支裝置修改那台主機的時間。
 
-**HTTPS 主機**(#63):多一個 `hostServiceAddress`(主機服務位址，例如 `https://studio.tail1234.ts.net`;只有 scheme、主機與埠，
-本機測試的 `http://127.0.0.1:<埠>` 也收),`address`／`port` 是它的主機名稱與埠、`username` 是空字串、`hostKeyFingerprint` 是 `null`;
-SSH 主機不帶 `hostServiceAddress`。裝置權杖不在白名單。body 可帶 `connectionMethods: [...]`(這支 app 看得懂的連線方式);
-**沒帶的是舊版 app,回應不含 HTTPS 主機**(舊版遇到不認得的連線方式會整個同步失敗),刪除紀錄照常給。後台要先於支援 HTTPS 的 app 上線。
+**HTTPS 主機**(#63、#250):`address` 只能是主機服務的主機名稱或 IP(不含 scheme、埠、路徑),埠只在 `port`(預設 443,例如 8443);
+app 以這兩個欄位組回主機服務位址(loopback 是本機測試、用 http,其他一律 https),沒有另外的位址欄位。`username` 是空字串、
+`hostKeyFingerprint` 是 `null`;裝置權杖不在白名單。body 可帶 `connectionMethods: [...]`(這支 app 看得懂的連線方式);
+**沒帶的 app 回應不含 HTTPS 主機**(不認得的連線方式會讓整個同步失敗),刪除紀錄照常給。
 
 **主機圖示**(#243):修改可多帶 `icon`(app `HostIcon` 的存檔值，例如 `macMini`、`rack`,「無」是 `none`;後台只檢查是 1–32 個英數字、
-不列舉名稱，較新版 app 加的圖示也收)。**沒帶 `icon` 的修改(舊版 app)保留已存的圖示**;刪除時清掉。回應只有存過圖示的主機帶 `icon`;
-舊版 app 解析時忽略這個欄位，新版 app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
+不列舉名稱，較新版 app 加的圖示也收)。**沒帶 `icon` 的修改保留已存的圖示**;刪除時清掉。回應只有存過圖示的主機帶 `icon`;
+app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 
-上線順序：後台是手動部署，不會跟著 app 發布上線。先 `npx wrangler d1 migrations apply purrdr --remote`(套用 `0005`)、再 `npx wrangler deploy`
-部署後台，app 才會開始同步圖示。舊後台不收 `icon`(回 400 `invalid_request`「Unexpected field: icon.」);app 收到這個回應時，
-同一次同步改送不含圖示的版本(其他欄位照常同步)，並記到這次 app 執行結束，之後直接不帶。所以舊後台期間 app 自動略過圖示，
-後台部署後 app 下次啟動就恢復同步圖示。
+首次部署(後台還沒上線過，也沒有舊資料):依「上線前要填的東西」填好設定後，先 `npx wrangler d1 migrations apply purrdr --remote`
+(套用 `0001`～`0005`),再 `npx wrangler deploy`,最後把後台網址填進 app 的 `BackendConfiguration.swift` 發版。後台是手動部署，
+不會跟著 app 發布上線。
 
 存取權杖放在 `Authorization: Bearer <accessToken>`。
 

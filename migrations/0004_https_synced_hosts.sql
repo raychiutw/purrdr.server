@@ -1,4 +1,4 @@
--- 主機同步支援 HTTPS 主機(#63、ADR-0010):多一種連線方式 https 與它的主機服務位址。
+-- 主機同步支援 HTTPS 主機(#63、ADR-0010):多一種連線方式 https。主機服務位址以 address＋port 存(#250)。
 -- 裝置權杖永不上傳，所以這裡沒有權杖欄位。SQLite 不能改 CHECK,所以重建資料表(沒有別的資料表參照它)。
 
 CREATE TABLE synced_hosts_new (
@@ -10,8 +10,6 @@ CREATE TABLE synced_hosts_new (
   username TEXT,
   connection_method TEXT CHECK (connection_method IN ('tailscale_ssh', 'openssh', 'https')),
   host_key_fingerprint TEXT,
-  -- HTTPS 主機的主機服務位址(例如 https://studio.tail1234.ts.net);SSH 主機是 NULL。
-  host_service_address TEXT,
   modified_at INTEGER NOT NULL,
   deleted_at INTEGER,
   updated_at INTEGER NOT NULL,
