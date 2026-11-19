@@ -4,17 +4,19 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /** 額外的回應 header(例如 429 的 `retry-after`)。 */
+    readonly headers: Record<string, string> = {},
   ) {
     super(message);
   }
 }
 
-export function json(body: unknown, status = 200): Response {
-  return Response.json(body, { status, headers: { "cache-control": "no-store" } });
+export function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
+  return Response.json(body, { status, headers: { ...headers, "cache-control": "no-store" } });
 }
 
 export function errorResponse(error: ApiError): Response {
-  return json({ error: { code: error.code, message: error.message } }, error.status);
+  return json({ error: { code: error.code, message: error.message } }, error.status, error.headers);
 }
 
 /// 讀 JSON body,並確認是物件。

@@ -1,4 +1,10 @@
 import type { Provider, VerifiedIdentity } from "./identity";
+import { decryptAppleToken, encryptAppleToken } from "./token-encryption";
+
+/// 寫入前加密 Apple refresh token(沒有就是 null,讓 COALESCE 保留舊值)。
+async function sealedAppleToken(env: Env, identity: VerifiedIdentity, appleRefreshToken: string | null): Promise<string | null> {
+  return appleRefreshToken === null ? null : encryptAppleToken(env, identity.subject, appleRefreshToken);
+}
 
 /// 會員在 API 上的樣子。
 export type MemberView = {
@@ -34,7 +40,7 @@ export async function createMember(env: Env, identity: VerifiedIdentity, appleRe
     env.DB.prepare("INSERT INTO members (id, created_at) VALUES (?, ?)").bind(id, now),
     env.DB.prepare(
       "INSERT INTO identities (provider, subject, member_id, email, apple_refresh_token, linked_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).bind(identity.provider, identity.subject, id, identity.email, appleRefreshToken, now),
+    ).bind(identity.provider, identity.subject, id, identity.email, await sealedAppleToken(env, identity, appleRefreshToken), now),
   ]);
   return id;
 }
@@ -51,13 +57,19 @@ export async function hasDataBlockingMerge(env: Env, memberId: string): Promise<
   return row?.empty !== 1;
 }
 
+/// `apple_refresh_token` 已解密;解不開視同沒有。
 type StoredIdentity = { provider: Provider; subject: string; apple_refresh_token: string | null };
 
 export async function identitiesOf(env: Env, memberId: string): Promise<StoredIdentity[]> {
   const { results } = await env.DB.prepare("SELECT provider, subject, apple_refresh_token FROM identities WHERE member_id = ?")
     .bind(memberId)
     .all<StoredIdentity>();
-  return results;
+  return Promise.all(
+    results.map(async (row) => ({
+      ...row,
+      apple_refresh_token: row.apple_refresh_token === null ? null : await decryptAppleToken(env, row.subject, row.apple_refresh_token),
+    })),
+  );
 }
 
 /// 把登入身分加到會員身上。
@@ -65,7 +77,7 @@ export async function addIdentity(env: Env, memberId: string, identity: Verified
   await env.DB.prepare(
     "INSERT INTO identities (provider, subject, member_id, email, apple_refresh_token, linked_at) VALUES (?, ?, ?, ?, ?, ?)",
   )
-    .bind(identity.provider, identity.subject, memberId, identity.email, appleRefreshToken, Date.now())
+    .bind(identity.provider, identity.subject, memberId, identity.email, await sealedAppleToken(env, identity, appleRefreshToken), Date.now())
     .run();
 }
 
@@ -84,7 +96,7 @@ export async function absorbIdentity(
     env.DB.prepare(
       `UPDATE identities SET member_id = ?, email = COALESCE(?, email), apple_refresh_token = COALESCE(?, apple_refresh_token), linked_at = ?
        WHERE provider = ? AND subject = ? AND member_id = ? AND ${NO_BLOCKING_DATA}`,
-    ).bind(memberId, identity.email, appleRefreshToken, Date.now(), identity.provider, identity.subject, otherMemberId, ...otherIsEmpty),
+    ).bind(memberId, identity.email, await sealedAppleToken(env, identity, appleRefreshToken), Date.now(), identity.provider, identity.subject, otherMemberId, ...otherIsEmpty),
     env.DB.prepare(
       `DELETE FROM members WHERE id = ? AND ${NO_BLOCKING_DATA}
        AND NOT EXISTS (SELECT 1 FROM identities WHERE provider = ? AND subject = ? AND member_id = ?)`,
@@ -107,6 +119,6 @@ export async function refreshIdentity(env: Env, identity: VerifiedIdentity, appl
   await env.DB.prepare(
     "UPDATE identities SET email = COALESCE(?, email), apple_refresh_token = COALESCE(?, apple_refresh_token) WHERE provider = ? AND subject = ?",
   )
-    .bind(identity.email, appleRefreshToken, identity.provider, identity.subject)
+    .bind(identity.email, await sealedAppleToken(env, identity, appleRefreshToken), identity.provider, identity.subject)
     .run();
 }

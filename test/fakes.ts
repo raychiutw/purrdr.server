@@ -212,8 +212,10 @@ async function sign(
 
 export type ApiResponse = { status: number; body: any };
 
-export async function api(method: string, path: string, options: { body?: unknown; accessToken?: string } = {}): Promise<ApiResponse> {
-  const headers: Record<string, string> = {};
+export type ApiOptions = { body?: unknown; accessToken?: string; headers?: Record<string, string> };
+
+export async function api(method: string, path: string, options: ApiOptions = {}): Promise<ApiResponse & { headers: Headers }> {
+  const headers: Record<string, string> = { ...options.headers };
   if (options.body !== undefined) headers["content-type"] = "application/json";
   if (options.accessToken) headers.authorization = `Bearer ${options.accessToken}`;
   const response = await exports.default.fetch(`https://backend.test${path}`, {
@@ -222,7 +224,7 @@ export async function api(method: string, path: string, options: { body?: unknow
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
   const text = await response.text();
-  return { status: response.status, body: text ? JSON.parse(text) : null };
+  return { status: response.status, body: text ? JSON.parse(text) : null, headers: response.headers };
 }
 
 /// 用 Sign in with Apple 登入(預設帶 authorization code,後台會拿去跟 Apple 換 refresh token)。

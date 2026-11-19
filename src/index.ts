@@ -31,9 +31,24 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
+/// App Store 通知來自 Apple 的伺服器(IP 共用且被擋會延後訂閱狀態),而且要驗簽章，不限流。
+const RATE_LIMIT_EXEMPT = new Set(["POST /v1/app-store/notifications"]);
+const RATE_LIMIT_PERIOD_SECONDS = 60;
+
+/// 每個 IP 60 秒最多 60 次(#2)。沒有 `CF-Connecting-IP` 只會是本機(Cloudflare 一律會帶),不限流。
+async function enforceIpRateLimit(request: Request, env: Env, key: string): Promise<void> {
+  const ip = request.headers.get("cf-connecting-ip");
+  if (!ip || RATE_LIMIT_EXEMPT.has(key)) return;
+  const { success } = await env.IP_RATE_LIMITER.limit({ key: ip });
+  if (!success) {
+    throw new ApiError(429, "rate_limited", "Too many requests. Try again later.", { "retry-after": `${RATE_LIMIT_PERIOD_SECONDS}` });
+  }
+}
+
 async function route(request: Request, env: Env): Promise<Response> {
   const { pathname } = new URL(request.url);
   const key = `${request.method} ${pathname}`;
+  await enforceIpRateLimit(request, env, key);
   const pairingPath = /^DELETE \/v1\/members\/me\/push-pairings\/([^/]+)$/.exec(key);
   if (pairingPath) {
     await revokePairing(env, await authenticate(env, request), decodeURIComponent(pairingPath[1]!));

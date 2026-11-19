@@ -35,10 +35,12 @@ export default defineConfig({
       const keys = testKeys();
       const appStoreRoot = await testAppStoreRoot();
       const accessTokenSecret = randomBytes(32).toString("base64url");
+      const appleTokenEncryptionKey = randomBytes(32).toString("base64");
       // wrangler 會檢查 wrangler.jsonc 宣告的必要 secrets;測試值放進 process.env,免得每次都警告。
       process.env.APPLE_PRIVATE_KEY = keys.applePrivateKey;
       process.env.ACCESS_TOKEN_SECRET = accessTokenSecret;
       process.env.APNS_PRIVATE_KEY = keys.apnsPrivateKey;
+      process.env.APPLE_TOKEN_ENCRYPTION_KEY = appleTokenEncryptionKey;
       return {
         wrangler: { configPath: "./wrangler.jsonc" },
         miniflare: {
@@ -48,6 +50,7 @@ export default defineConfig({
             GOOGLE_CLIENT_IDS: "test-ios.apps.googleusercontent.com,test-android.apps.googleusercontent.com",
             APPLE_PRIVATE_KEY: keys.applePrivateKey,
             ACCESS_TOKEN_SECRET: accessTokenSecret,
+            APPLE_TOKEN_ENCRYPTION_KEY: appleTokenEncryptionKey,
             TEST_APPLE_ID_TOKEN_KEY: keys.appleIdTokenKey,
             TEST_GOOGLE_ID_TOKEN_KEY: keys.googleIdTokenKey,
             TEST_APPLE_CLIENT_SECRET_PUBLIC_JWK: keys.applePublicJwk,
