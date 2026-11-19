@@ -128,7 +128,7 @@ SSH 主機不帶 `hostServiceAddress`。裝置權杖不在白名單。body 可�
 | APNs 驗證金鑰 Key ID | `wrangler.jsonc` 的 `APNS_KEY_ID` | Apple Developer → Keys,建立啟用 Apple Push Notifications service (APNs) 的金鑰(環境選 Sandbox & Production);Team ID 沿用 `APPLE_TEAM_ID` |
 | APNs 私鑰 | secret `APNS_PRIVATE_KEY` | 上一步下載的 `.p8` 全文:`npx wrangler secret put APNS_PRIVATE_KEY < AuthKey_XXXX.p8` |
 | App ID 開推播 | Apple Developer → Identifiers | `com.raychiu.purrdr` 勾選 Push Notifications 與 Time Sensitive Notifications(app 的 entitlement 已加 `aps-environment` 與 time-sensitive) |
-| 主機外掛的公開 repo | GitHub | 把本 repo 的 `host-plugin/` 發佈成公開 repo `raychiutw/purrdr-host-plugin`(根目錄就是 `herdr-plugin.toml`),加 topic `herdr-plugin`;app 的 `PushConfiguration.pluginSource` 要一致。外掛的後台網址在配對檔裡，由 app 寫入 |
+| 主機外掛的公開 repo | GitHub | 主機外掛在公開 repo `raychiutw/purrdr-host` 的 `host-plugin/`(已發佈;herdr 以 `OWNER/REPO/SUBDIR` 安裝 `raychiutw/purrdr-host/host-plugin`);app 的 `PushSettings.pluginSource` 要一致。外掛的後台網址在配對檔裡，由 app 寫入 |
 | 隱私權政策網址 | app 的 `PurrdrLinks.privacyPolicy`(`src/PurrdrFeatures/PlusView.swift`)、App Store Connect | 已是 `https://raychiutw.github.io/purrdr/privacy/`;網頁原始碼在 `docs/site/purrdr/`,要發佈到 `raychiutw.github.io` repo 的 `purrdr/` 資料夾(見 `docs/launch/checklist.md`) |
 | 使用條款 | App Store Connect 的 License Agreement | 目前用 Apple 標準 EULA(`PurrdrLinks.termsOfUse`);改用自訂條款時兩邊一起換 |
 | Google client ID(app 端) | app 的 `src/App/Purrdr/BackendConfiguration.swift` | 同上面的 iOS OAuth client ID |
