@@ -81,7 +81,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 409 | `pairing_in_use` | 這個配對密鑰雜湊已屬於另一個會員 |
 | 410 | `pairing_revoked` | APNs 說 device token 已失效(`Unregistered`、`BadDeviceToken`、`DeviceTokenNotForTopic`);配對已刪除 |
 | 413 | `invalid_request` | 推播請求 body 超過 2 KB |
-| 429 | `rate_limited` | 這組配對密鑰一分鐘內超過 10 則 |
+| 429 | `rate_limited` | 同一個 IP(`CF-Connecting-IP`)60 秒內超過 60 次(帶 `Retry-After` 秒數;App Store 通知不限流),或推播的這組配對密鑰一分鐘內超過 10 則 |
 | 502 | `apns_failed` | APNs 拒絕或連不上(配對保留) |
 | 409 | `identity_in_use` | 要連結的身分屬於另一個有訂閱或同步資料的會員 |
 | 409 | `subscription_in_use` | 這個 App Store 訂閱已屬於另一個會員 |
@@ -108,6 +108,8 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
   - **刪除留紀錄**:欄位清空，只留 id 與刪除時間，列在 `deletedHostIds`;之後同一個 id 的上傳一律忽略(即使修改時間較晚),還沒同步到刪除的裝置傳不回來。
   - **只收白名單欄位**:修改與刪除各自的欄位以外，多一個欄位(例如 `password`、`privateKey`、`authentication`、`deviceToken`)整個請求 400 `invalid_request`、什麼都不存。
     私鑰、密碼、passphrase、裝置權杖、登入方式、herdr 路徑與 session、作業系統都不上傳。一次最多 200 筆;任何一筆不合法，整個請求不動資料。
+- **限流**(#2):所有 API 依 `CF-Connecting-IP` 每 60 秒最多 60 次(Workers Rate Limiting binding `IP_RATE_LIMITER`,`wrangler.jsonc` 的 `ratelimits`;計數是每個 Cloudflare 據點各自算、近似值)。超過回 429 `rate_limited` 與 `Retry-After: 60`。`POST /v1/app-store/notifications` 不限流：來自 Apple 共用的伺服器 IP,被擋會延後訂閱狀態，且每則都要驗 App Store 簽章。推播另有每組配對密鑰每分鐘 10 則。
+- **Apple refresh token**(#3):`identities.apple_refresh_token` 以 AES-GCM 加密(金鑰 secret `APPLE_TOKEN_ENCRYPTION_KEY`,身分的 subject 當 AAD),存 base64(IV ‖ 密文);只在撤銷時解密，解不開(金鑰換過、資料壞掉)視同沒有權杖。更換金鑰會讓既有權杖無法撤銷(之後重新登入時會存新的)。
 - **刪除會員**:先撤銷 Sign in with Apple 權杖(Apple 回 200 或 400 都算完成),成功才刪資料;刪除靠 foreign key 的 `ON DELETE CASCADE`。Apple 訂閱不會因此取消，由 app 提醒使用者自行取消。
 
 ## 資料表
@@ -124,6 +126,8 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | Sign in with Apple Key ID | `wrangler.jsonc` 的 `APPLE_KEY_ID` | Apple Developer → Keys,建立啟用 Sign in with Apple 的金鑰(綁 `com.raychiu.purrdr`) |
 | Sign in with Apple 私鑰 | secret `APPLE_PRIVATE_KEY` | 上一步下載的 `.p8` 全文:`npx wrangler secret put APPLE_PRIVATE_KEY < AuthKey_XXXX.p8` |
 | 存取權杖密鑰 | secret `ACCESS_TOKEN_SECRET` | `openssl rand -base64 48 \| npx wrangler secret put ACCESS_TOKEN_SECRET`;更換會讓所有存取權杖失效(更新權杖不受影響) |
+| Apple 權杖加密金鑰 | secret `APPLE_TOKEN_ENCRYPTION_KEY` | `openssl rand -base64 32 \| npx wrangler secret put APPLE_TOKEN_ENCRYPTION_KEY`(32 bytes);更換會讓已存的 Sign in with Apple 權杖無法撤銷 |
+| 限流 namespace | `wrangler.jsonc` 的 `ratelimits[].namespace_id` | 已填 `1001`;同一個 Cloudflare 帳號內要唯一的正整數字串，跟其他 Worker 重複時改掉 |
 | Google OAuth client ID | `wrangler.jsonc` 的 `GOOGLE_CLIENT_IDS` | Google Cloud Console 建立 iOS 類型的 OAuth client(bundle id `com.raychiu.purrdr`);app 端也要填同一個 ID(見下) |
 | App ID 開 Sign in with Apple | Apple Developer → Identifiers | `com.raychiu.purrdr` 勾選 Sign in with Apple(app 的 entitlement 已加) |
 | 後台網址 | app 的 `src/App/Purrdr/BackendConfiguration.swift` | 部署後的 `https://purrdr-backend.<子網域>.workers.dev` |
@@ -140,7 +144,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 使用條款 | App Store Connect 的 License Agreement | 目前用 Apple 標準 EULA(`PurrdrLinks.termsOfUse`);改用自訂條款時兩邊一起換 |
 | Google client ID(app 端) | app 的 `src/App/Purrdr/BackendConfiguration.swift` | 同上面的 iOS OAuth client ID |
 
-`APPLE_TEAM_ID`(`8Z6WVFJ574`)、`APPLE_CLIENT_ID`(bundle id)與 `APP_STORE_APP_APPLE_ID`(`6835416115`)已是真值。隱私權政策要寫明：後台保存登入身分的 subject 與 email(可能是 Apple 轉寄地址)、Sign in with Apple refresh token(只用於撤銷)、訂閱紀錄(App Store 的 original transaction ID、商品、購買與到期時間、退款或撤銷時間、自動續訂狀態)、推播配對(配對密鑰的雜湊、APNs device token 與環境);推播經過後台時只有 workspace 名稱、狀態與 pane id,後台不保存。
+`APPLE_TEAM_ID`(`8Z6WVFJ574`)、`APPLE_CLIENT_ID`(bundle id)與 `APP_STORE_APP_APPLE_ID`(`6835416115`)已是真值。隱私權政策要寫明：後台保存登入身分的 subject 與 email(可能是 Apple 轉寄地址)、Sign in with Apple refresh token(加密存放，只用於撤銷)、訂閱紀錄(App Store 的 original transaction ID、商品、購買與到期時間、退款或撤銷時間、自動續訂狀態)、推播配對(配對密鑰的雜湊、APNs device token 與環境);推播經過後台時只有 workspace 名稱、狀態與 pane id,後台不保存。
 會員開啟主機同步時，另保存每台主機的名稱、位址與埠、使用者名稱、連線方式(Tailscale SSH／OpenSSH／HTTPS)、host key 指紋、HTTPS 主機的主機服務位址與修改時間，
 以及已刪除主機的 id 與刪除時間;後台可讀(TLS 傳輸、Cloudflare 靜態加密，不做端對端加密)。私鑰、密碼、passphrase、裝置權杖永不上傳。刪除會員時一併刪除。
 
