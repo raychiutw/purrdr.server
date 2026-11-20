@@ -22,7 +22,10 @@ const HOST_SERVICE_PUSH_FIELDS = new Set(["key", "event", "version"]);
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const MAX_VERSION_LENGTH = 64;
 /// 配對可以選擇要收的推播種類(`host_service` = 主機服務事件)。
-const PAIRING_KINDS = new Set(["blocked", "done", "host_service"]);
+const PAIRING_KINDS = ["blocked", "done", "host_service"] as const;
+type PairingKind = (typeof PAIRING_KINDS)[number];
+/// 沒帶 `kinds` 的新配對只收「需要你」,舊版 app 行為不變。
+const DEFAULT_PAIRING_KINDS: readonly PairingKind[] = ["blocked"];
 const MAX_WORKSPACE_LENGTH = 100;
 const MAX_PUSH_BODY_BYTES = 2048;
 
@@ -36,7 +39,7 @@ const APNS_ORIGINS = { production: "https://api.push.apple.com", sandbox: "https
 /// APNs 表示「這個 token 不能再用」的回應：刪掉配對，讓外掛與 app 知道要重新配對。
 const DEAD_TOKEN_REASONS = new Set(["BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"]);
 
-type Pairing = { member_id: string; device_token: string; environment: keyof typeof APNS_ORIGINS; rate_count: number; kinds: string };
+type Pairing = { member_id: string; device_token: string; environment: keyof typeof APNS_ORIGINS; kinds: string };
 
 function invalid(message: string): ApiError {
   return new ApiError(400, "invalid_request", message);
@@ -70,7 +73,7 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
   const now = Date.now();
   const saved = await env.DB.prepare(
     `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, device_id, kinds, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, '["blocked"]'), ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ?), ?, ?)
      ON CONFLICT (key_hash) DO UPDATE SET
        platform = excluded.platform, device_token = excluded.device_token, environment = excluded.environment,
        device_id = COALESCE(excluded.device_id, push_pairings.device_id),
@@ -78,7 +81,7 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
      WHERE push_pairings.member_id = excluded.member_id
      RETURNING key_hash`,
   )
-    .bind(keyHash, memberId, platform, deviceToken, environment, device.deviceId, kinds, now, now, kinds)
+    .bind(keyHash, memberId, platform, deviceToken, environment, device.deviceId, kinds, JSON.stringify(DEFAULT_PAIRING_KINDS), now, now, kinds)
     .first();
   if (saved === null) throw new ApiError(409, "pairing_in_use", "This pairing key belongs to another member.");
   const saveDevice = saveDeviceStatement(env, memberId, device);
@@ -92,7 +95,7 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
 function readKinds(body: Record<string, unknown>): string | null {
   const kinds = body.kinds;
   if (kinds === undefined) return null;
-  if (!Array.isArray(kinds) || !kinds.every((kind) => typeof kind === "string" && PAIRING_KINDS.has(kind))) {
+  if (!Array.isArray(kinds) || !kinds.every(isPairingKind)) {
     throw invalid("kinds must be an array of blocked, done or host_service.");
   }
   return JSON.stringify([...new Set(kinds)]);
@@ -158,6 +161,16 @@ function readHostServicePush(fields: Record<string, unknown>): HostServicePush {
   return { kind: "host_service", key, event, version };
 }
 
+function isPairingKind(value: unknown): value is PairingKind {
+  return typeof value === "string" && (PAIRING_KINDS as readonly string[]).includes(value);
+}
+
+/// D1 存的是 JSON 字串;只留認得的種類，舊資料或手改的值不會讓推播出錯。
+function acceptedKinds(pairing: Pairing): PairingKind[] {
+  const stored: unknown = JSON.parse(pairing.kinds);
+  return Array.isArray(stored) ? stored.filter(isPairingKind) : [...DEFAULT_PAIRING_KINDS];
+}
+
 function isPushStatus(value: string): value is PushStatus {
   return Object.hasOwn(STATUS_ALERTS, value);
 }
@@ -166,17 +179,24 @@ function isHostServiceEvent(value: string): value is HostServiceEvent {
   return Object.hasOwn(HOST_SERVICE_ALERTS, value);
 }
 
-/// 找到配對並計入速率限制(固定一分鐘的視窗，一個 UPDATE 完成，避免同時的請求互相蓋掉計數)。
-async function takePairing(env: Env, keyHash: string, now: number): Promise<Pairing | null> {
-  return env.DB.prepare(
+async function findPairing(env: Env, keyHash: string): Promise<Pairing | null> {
+  return env.DB.prepare("SELECT member_id, device_token, environment, kinds FROM push_pairings WHERE key_hash = ?")
+    .bind(keyHash)
+    .first<Pairing>();
+}
+
+/// 計入速率限制，回傳是否超過(固定一分鐘的視窗，一個 UPDATE 完成，避免同時的請求互相蓋掉計數)。
+async function exceedsRateLimit(env: Env, keyHash: string, now: number): Promise<boolean> {
+  const counted = await env.DB.prepare(
     `UPDATE push_pairings SET
        rate_count = CASE WHEN ? - rate_window_started_at >= ? THEN 1 ELSE rate_count + 1 END,
        rate_window_started_at = CASE WHEN ? - rate_window_started_at >= ? THEN ? ELSE rate_window_started_at END
      WHERE key_hash = ?
-     RETURNING member_id, device_token, environment, rate_count, kinds`,
+     RETURNING rate_count`,
   )
     .bind(now, PUSH_RATE_WINDOW_MS, now, PUSH_RATE_WINDOW_MS, now, keyHash)
-    .first<Pairing>();
+    .first<{ rate_count: number }>();
+  return (counted?.rate_count ?? 0) > PUSH_RATE_LIMIT;
 }
 
 /// POST /v1/push:主機外掛送「需要你」或「完成」，或主機服務送事件。
@@ -185,22 +205,26 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   const push = await readPushRequest(request);
   const keyHash = await pairingKeyHash(push.key);
   const now = Date.now();
-  const pairing = await takePairing(env, keyHash, now);
+  const pairing = await findPairing(env, keyHash);
   if (pairing === null) {
     // 只回一次 410:外掛收到後會清掉本機配對，之後同一組密鑰當成不認得。
     const revoked = await env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ? RETURNING key_hash").bind(keyHash).first();
     if (revoked !== null) throw pairingRevoked();
     throw new ApiError(404, "pairing_not_found", "This pairing isn't registered. Turn notifications on again in Purrdr.");
   }
-  if (pairing.rate_count > PUSH_RATE_LIMIT) throw new ApiError(429, "rate_limited", "Too many notifications. Try again in a minute.");
   if (!(await hasActiveSubscription(env, pairing.member_id))) {
     throw new ApiError(403, "subscription_required", "This needs an active Purrdr Plus subscription.");
   }
   // 不是錯誤：主機端不需要知道使用者的偏好。
-  const kind = push.kind === "host_service" ? "host_service" : push.status;
-  if (!(JSON.parse(pairing.kinds) as string[]).includes(kind)) return false;
+  const kind: PairingKind = push.kind === "host_service" ? "host_service" : push.status;
+  if (!acceptedKinds(pairing).includes(kind)) return false;
   const hostEvent = push.kind === "host_service" ? push : null;
   if (hostEvent !== null && !(await claimHostServiceEvent(env, keyHash, pairing.member_id, hostEvent, now))) return false;
+  // 只有真的要送 APNs 的才計入，偏好或去重擋下的不會擠掉「需要你」。
+  if (await exceedsRateLimit(env, keyHash, now)) {
+    if (hostEvent !== null) await releaseHostServiceEvent(env, keyHash, hostEvent);
+    throw new ApiError(429, "rate_limited", "Too many notifications. Try again in a minute.");
+  }
 
   const response = await deliverToApns(env, pairing, apnsPayload(push, keyHash));
   if (response.ok) return true;

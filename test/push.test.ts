@@ -379,6 +379,17 @@ describe("Agent 完成(done)與種類偏好", () => {
     expect(limited.body.error.code).toBe("rate_limited");
   });
 
+  it("偏好擋下的推播不計入速率限制，之後的「需要你」照常送達", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key);
+
+    for (let index = 0; index < 20; index += 1) expect((await push(done(key))).body).toEqual({ delivered: false });
+
+    expect((await push(blocked(key))).body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+  });
+
   it("訂閱到期後 done 一樣不轉送(403 subscription_required)", async () => {
     const me = await member();
     const purchaseDate = Date.now() - 40 * DAY;
@@ -627,6 +638,15 @@ describe("主機服務事件去重(同一組密鑰＋event＋version 24 小時�
     expect(again.status).toBe(200);
     expect(again.body).toEqual({ delivered: false });
     expect(identityProviders.apnsCalls).toHaveLength(1);
+  });
+
+  it("去重擋下的重複事件不計入速率限制，之後的「需要你」照常送達", async () => {
+    const { key } = await hostServicePairing();
+
+    for (let index = 0; index < 20; index += 1) await push(hostEvent(key, "host_service_updated", "0.7.0"));
+
+    expect((await push(blocked(key))).body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(2);
   });
 
   it("沒帶版本的同一個事件也只送一次", async () => {
