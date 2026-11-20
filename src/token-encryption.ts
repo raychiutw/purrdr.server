@@ -5,7 +5,9 @@ const IV_LENGTH = 12;
 
 async function importKey(env: Env): Promise<CryptoKey> {
   const raw = Uint8Array.from(atob(env.APPLE_TOKEN_ENCRYPTION_KEY), (character) => character.charCodeAt(0));
-  if (raw.length !== 32) throw new Error("APPLE_TOKEN_ENCRYPTION_KEY must be 32 bytes (base64).");
+  if (raw.length !== 32) {
+    throw new Error("APPLE_TOKEN_ENCRYPTION_KEY must be 32 bytes (base64).");
+  }
   return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
@@ -26,7 +28,9 @@ export async function encryptAppleToken(env: Env, subject: string, token: string
 export async function decryptAppleToken(env: Env, subject: string, stored: string): Promise<string | null> {
   try {
     const sealed = Uint8Array.from(atob(stored), (character) => character.charCodeAt(0));
-    if (sealed.length <= IV_LENGTH) return null;
+    if (sealed.length <= IV_LENGTH) {
+      return null;
+    }
     const plaintext = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv: sealed.slice(0, IV_LENGTH), additionalData: new TextEncoder().encode(subject) },
       await importKey(env),

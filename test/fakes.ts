@@ -75,7 +75,9 @@ class IdentityProviders {
         const clientId = form.get("client_id") ?? "";
         const clientSecretValid = await verifyClientSecret(form.get("client_secret"), clientId);
         this.appleTokenCalls.push({ code, clientSecretValid, clientId });
-        if (!clientSecretValid) return Response.json({ error: "invalid_client" }, { status: 400 });
+        if (!clientSecretValid) {
+          return Response.json({ error: "invalid_client" }, { status: 400 });
+        }
         if (this.appleTokenStatus !== 200 || form.get("grant_type") !== "authorization_code") {
           return Response.json({ error: "invalid_grant" }, { status: this.appleTokenStatus === 200 ? 400 : this.appleTokenStatus });
         }
@@ -114,7 +116,9 @@ class IdentityProviders {
       payload: await request.json(),
     });
     const reply = this.apnsReplies.shift() ?? { status: 200 };
-    if (reply.status === 200) return new Response(null, { status: 200, headers: { "apns-id": crypto.randomUUID() } });
+    if (reply.status === 200) {
+      return new Response(null, { status: 200, headers: { "apns-id": crypto.randomUUID() } });
+    }
     return Response.json({ reason: reply.reason ?? "InternalServerError" }, { status: reply.status });
   }
 }
@@ -139,7 +143,9 @@ function publicJwk(privateJson: string, kid: string): JWK {
 
 /// Apple 的 client secret:ES256、kid 是 Key ID、iss 是 Team ID、sub 與 client_id 相同、aud 是 appleid。
 async function verifyClientSecret(secret: string | null, clientId: string): Promise<boolean> {
-  if (!secret) return false;
+  if (!secret) {
+    return false;
+  }
   try {
     const key = await importJWK(JSON.parse(env.TEST_APPLE_CLIENT_SECRET_PUBLIC_JWK) as JWK, "ES256");
     const { payload, protectedHeader } = await jwtVerify(secret, key, {
@@ -216,8 +222,12 @@ export type ApiOptions = { body?: unknown; accessToken?: string; headers?: Recor
 
 export async function api(method: string, path: string, options: ApiOptions = {}): Promise<ApiResponse & { headers: Headers }> {
   const headers: Record<string, string> = { ...options.headers };
-  if (options.body !== undefined) headers["content-type"] = "application/json";
-  if (options.accessToken) headers.authorization = `Bearer ${options.accessToken}`;
+  if (options.body !== undefined) {
+    headers["content-type"] = "application/json";
+  }
+  if (options.accessToken) {
+    headers.authorization = `Bearer ${options.accessToken}`;
+  }
   const response = await exports.default.fetch(`https://backend.test${path}`, {
     method,
     headers,

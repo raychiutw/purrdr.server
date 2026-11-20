@@ -48,7 +48,9 @@ function invalid(message: string): ApiError {
 /// 配對密鑰(64 位小寫 hex = 32 bytes)的雜湊：那 32 bytes 的 SHA-256,小寫 hex。
 export async function pairingKeyHash(key: string): Promise<string> {
   const bytes = new Uint8Array(key.length / 2);
-  for (let index = 0; index < bytes.length; index += 1) bytes[index] = parseInt(key.slice(index * 2, index * 2 + 2), 16);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = parseInt(key.slice(index * 2, index * 2 + 2), 16);
+  }
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -62,10 +64,18 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
   const platform = requireString(body, "platform");
   const deviceToken = requireString(body, "deviceToken").toLowerCase();
   const environment = requireString(body, "environment");
-  if (!HEX_64.test(keyHash)) throw invalid("keyHash must be 64 lowercase hex characters.");
-  if (platform !== "apns") throw invalid("Unsupported platform.");
-  if (!DEVICE_TOKEN.test(deviceToken)) throw invalid("deviceToken must be hex.");
-  if (!ENVIRONMENTS.has(environment)) throw invalid("environment must be production or sandbox.");
+  if (!HEX_64.test(keyHash)) {
+    throw invalid("keyHash must be 64 lowercase hex characters.");
+  }
+  if (platform !== "apns") {
+    throw invalid("Unsupported platform.");
+  }
+  if (!DEVICE_TOKEN.test(deviceToken)) {
+    throw invalid("deviceToken must be hex.");
+  }
+  if (!ENVIRONMENTS.has(environment)) {
+    throw invalid("environment must be production or sandbox.");
+  }
   const device = readDeviceIdentity(body);
   const kinds = readKinds(body);
   await requireActiveSubscription(env, memberId);
@@ -83,7 +93,9 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
   )
     .bind(keyHash, memberId, platform, deviceToken, environment, device.deviceId, kinds, JSON.stringify(DEFAULT_PAIRING_KINDS), now, now, kinds)
     .first();
-  if (saved === null) throw new ApiError(409, "pairing_in_use", "This pairing key belongs to another member.");
+  if (saved === null) {
+    throw new ApiError(409, "pairing_in_use", "This pairing key belongs to another member.");
+  }
   const saveDevice = saveDeviceStatement(env, memberId, device);
   await env.DB.batch([
     env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ?").bind(keyHash),
@@ -94,7 +106,9 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
 /// 選用的 `kinds`:要收的推播種類，存成 JSON 字串;沒帶回 null(新配對預設只收 blocked,既有配對保留原偏好)。
 function readKinds(body: Record<string, unknown>): string | null {
   const kinds = body.kinds;
-  if (kinds === undefined) return null;
+  if (kinds === undefined) {
+    return null;
+  }
   if (!Array.isArray(kinds) || !kinds.every(isPairingKind)) {
     throw invalid("kinds must be an array of blocked, done or host_service.");
   }
@@ -116,14 +130,18 @@ type PushRequest = StatusPush | HostServicePush;
 
 async function readPushRequest(request: Request): Promise<PushRequest> {
   const text = await request.text();
-  if (new TextEncoder().encode(text).length > MAX_PUSH_BODY_BYTES) throw new ApiError(413, "invalid_request", "Request body is too large.");
+  if (new TextEncoder().encode(text).length > MAX_PUSH_BODY_BYTES) {
+    throw new ApiError(413, "invalid_request", "Request body is too large.");
+  }
   let body: unknown;
   try {
     body = JSON.parse(text);
   } catch {
     throw invalid("Request body must be JSON.");
   }
-  if (typeof body !== "object" || body === null || Array.isArray(body)) throw invalid("Request body must be a JSON object.");
+  if (typeof body !== "object" || body === null || Array.isArray(body)) {
+    throw invalid("Request body must be a JSON object.");
+  }
   const fields = body as Record<string, unknown>;
   return fields.event === undefined ? readStatusPush(fields) : readHostServicePush(fields);
 }
@@ -131,10 +149,14 @@ async function readPushRequest(request: Request): Promise<PushRequest> {
 /// 兩種推播共用：只接受白名單欄位，並驗證配對密鑰。
 function readPushKey(fields: Record<string, unknown>, allowedFields: Set<string>): string {
   for (const field of Object.keys(fields)) {
-    if (!allowedFields.has(field)) throw invalid(`Unknown field: ${field}.`);
+    if (!allowedFields.has(field)) {
+      throw invalid(`Unknown field: ${field}.`);
+    }
   }
   const key = requireString(fields, "key");
-  if (!HEX_64.test(key)) throw invalid("key must be 64 lowercase hex characters.");
+  if (!HEX_64.test(key)) {
+    throw invalid("key must be 64 lowercase hex characters.");
+  }
   return key;
 }
 
@@ -143,9 +165,15 @@ function readStatusPush(fields: Record<string, unknown>): StatusPush {
   const workspace = requireString(fields, "workspace");
   const status = requireString(fields, "status");
   const pane = fields.pane === undefined ? null : fields.pane;
-  if ([...workspace].length > MAX_WORKSPACE_LENGTH) throw invalid("workspace is too long.");
-  if (!isPushStatus(status)) throw invalid("Unsupported status.");
-  if (pane !== null && (typeof pane !== "string" || !PANE_ID.test(pane))) throw invalid("pane must be a herdr pane id.");
+  if ([...workspace].length > MAX_WORKSPACE_LENGTH) {
+    throw invalid("workspace is too long.");
+  }
+  if (!isPushStatus(status)) {
+    throw invalid("Unsupported status.");
+  }
+  if (pane !== null && (typeof pane !== "string" || !PANE_ID.test(pane))) {
+    throw invalid("pane must be a herdr pane id.");
+  }
   return { kind: "status", key, workspace, status, pane };
 }
 
@@ -153,11 +181,15 @@ function readHostServicePush(fields: Record<string, unknown>): HostServicePush {
   const key = readPushKey(fields, HOST_SERVICE_PUSH_FIELDS);
   const event = requireString(fields, "event");
   const version = fields.version === undefined ? null : fields.version;
-  if (!isHostServiceEvent(event)) throw invalid("Unsupported event.");
+  if (!isHostServiceEvent(event)) {
+    throw invalid("Unsupported event.");
+  }
   if (version !== null && (typeof version !== "string" || version.length > MAX_VERSION_LENGTH || !SEMVER.test(version))) {
     throw invalid("version must be a semantic version.");
   }
-  if (HOST_SERVICE_ALERTS[event].withVersion && version === null) throw invalid("version is required for this event.");
+  if (HOST_SERVICE_ALERTS[event].withVersion && version === null) {
+    throw invalid("version is required for this event.");
+  }
   return { kind: "host_service", key, event, version };
 }
 
@@ -209,7 +241,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   if (pairing === null) {
     // 只回一次 410:外掛收到後會清掉本機配對，之後同一組密鑰當成不認得。
     const revoked = await env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ? RETURNING key_hash").bind(keyHash).first();
-    if (revoked !== null) throw pairingRevoked();
+    if (revoked !== null) {
+      throw pairingRevoked();
+    }
     throw new ApiError(404, "pairing_not_found", "This pairing isn't registered. Turn notifications on again in Purrdr.");
   }
   if (!(await hasActiveSubscription(env, pairing.member_id))) {
@@ -217,19 +251,29 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   }
   // 不是錯誤：主機端不需要知道使用者的偏好。
   const kind: PairingKind = push.kind === "host_service" ? "host_service" : push.status;
-  if (!acceptedKinds(pairing).includes(kind)) return false;
+  if (!acceptedKinds(pairing).includes(kind)) {
+    return false;
+  }
   const hostEvent = push.kind === "host_service" ? push : null;
-  if (hostEvent !== null && !(await claimHostServiceEvent(env, keyHash, pairing.member_id, hostEvent, now))) return false;
+  if (hostEvent !== null && !(await claimHostServiceEvent(env, keyHash, pairing.member_id, hostEvent, now))) {
+    return false;
+  }
   // 只有真的要送 APNs 的才計入，偏好或去重擋下的不會擠掉「需要你」。
   if (await exceedsRateLimit(env, keyHash, now)) {
-    if (hostEvent !== null) await releaseHostServiceEvent(env, keyHash, hostEvent);
+    if (hostEvent !== null) {
+      await releaseHostServiceEvent(env, keyHash, hostEvent);
+    }
     throw new ApiError(429, "rate_limited", "Too many notifications. Try again in a minute.");
   }
 
   const response = await deliverToApns(env, pairing, apnsPayload(push, keyHash));
-  if (response.ok) return true;
+  if (response.ok) {
+    return true;
+  }
   // 沒送到就不算送過，主機服務重送時可以再試。
-  if (hostEvent !== null) await releaseHostServiceEvent(env, keyHash, hostEvent);
+  if (hostEvent !== null) {
+    await releaseHostServiceEvent(env, keyHash, hostEvent);
+  }
   const reason = await apnsReason(response);
   if (response.status === 410 || DEAD_TOKEN_REASONS.has(reason)) {
     await env.DB.prepare("DELETE FROM push_pairings WHERE key_hash = ?").bind(keyHash).run();
@@ -277,7 +321,9 @@ const STATUS_ALERTS: Record<PushStatus, { locKey: string; category: string; inte
 /// APNs payload 由後台組：標題是 workspace 名稱，內文依狀態固定。
 /// 根層的 `pairing`(配對密鑰雜湊)與 `pane` 給 app 點通知時找主機與 Agent。
 export function apnsPayload(push: PushRequest, keyHash: string): Record<string, unknown> {
-  if (push.kind === "host_service") return hostServicePayload(push, keyHash);
+  if (push.kind === "host_service") {
+    return hostServicePayload(push, keyHash);
+  }
   const alert = STATUS_ALERTS[push.status];
   return {
     aps: {

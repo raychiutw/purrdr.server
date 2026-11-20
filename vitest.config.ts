@@ -67,5 +67,9 @@ export default defineConfig({
   ],
   test: {
     setupFiles: ["./test/setup.ts"],
+    // 每個測試都要簽 JWT、跑 D1 與假 APNs,機器忙時偶爾超過預設 5 秒。
+    testTimeout: 20_000,
+    // 本機的 agent worktree 會帶一份測試副本，不要一起跑。
+    exclude: ["**/node_modules/**", ".claude/**"],
   },
 });

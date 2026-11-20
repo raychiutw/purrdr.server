@@ -34,9 +34,13 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 function tlv(tag: number, value: Uint8Array): Uint8Array {
   const length = value.length;
   let header: number[];
-  if (length < 0x80) header = [tag, length];
-  else if (length < 0x100) header = [tag, 0x81, length];
-  else header = [tag, 0x82, length >> 8, length & 0xff];
+  if (length < 0x80) {
+    header = [tag, length];
+  } else if (length < 0x100) {
+    header = [tag, 0x81, length];
+  } else {
+    header = [tag, 0x82, length >> 8, length & 0xff];
+  }
   return concat(new Uint8Array(header), value);
 }
 
@@ -50,7 +54,9 @@ const boolean = (value: boolean) => tlv(0x01, new Uint8Array([value ? 0xff : 0])
 
 function integer(bytes: Uint8Array): Uint8Array {
   let start = 0;
-  while (start < bytes.length - 1 && bytes[start] === 0) start++;
+  while (start < bytes.length - 1 && bytes[start] === 0) {
+    start++;
+  }
   const trimmed = bytes.slice(start);
   return tlv(0x02, (trimmed[0] ?? 0) & 0x80 ? concat(new Uint8Array([0]), trimmed) : trimmed);
 }
@@ -60,7 +66,9 @@ function oid(dotted: string): Uint8Array {
   const bytes = [40 * parts[0]! + parts[1]!];
   for (const part of parts.slice(2)) {
     const chunk = [part & 0x7f];
-    for (let value = part >>> 7; value > 0; value >>>= 7) chunk.unshift((value & 0x7f) | 0x80);
+    for (let value = part >>> 7; value > 0; value >>>= 7) {
+      chunk.unshift((value & 0x7f) | 0x80);
+    }
     bytes.push(...chunk);
   }
   return tlv(0x06, new Uint8Array(bytes));
@@ -113,8 +121,12 @@ export async function makeCertificate(options: CertificateOptions): Promise<Test
   const spki = new Uint8Array((await crypto.subtle.exportKey("spki", keyPair.publicKey)) as ArrayBuffer);
   const signer = options.issuer ?? { subject: options.subject, privateKey: keyPair.privateKey };
   const extensions: Uint8Array[] = [];
-  if (options.ca) extensions.push(sequence(oid(OID.basicConstraints), boolean(true), octetString(sequence(boolean(true)))));
-  for (const marker of options.markers ?? []) extensions.push(sequence(oid(marker), octetString(new Uint8Array([0x05, 0x00]))));
+  if (options.ca) {
+    extensions.push(sequence(oid(OID.basicConstraints), boolean(true), octetString(sequence(boolean(true)))));
+  }
+  for (const marker of options.markers ?? []) {
+    extensions.push(sequence(oid(marker), octetString(new Uint8Array([0x05, 0x00]))));
+  }
   const signatureAlgorithm = sequence(oid(OID.ecdsaWithSha384));
   const serial = crypto.getRandomValues(new Uint8Array(12));
   serial[0] = serial[0]! & 0x7f;
@@ -136,6 +148,8 @@ export async function makeCertificate(options: CertificateOptions): Promise<Test
 
 export function base64(bytes: Uint8Array): string {
   let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
   return btoa(binary);
 }

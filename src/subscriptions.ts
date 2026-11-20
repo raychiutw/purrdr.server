@@ -44,9 +44,15 @@ type Row = {
 };
 
 function statusOf(row: Row, now: number): SubscriptionStatus {
-  if (row.revoked_at !== null) return "revoked";
-  if (row.expires_at > now) return "active";
-  if (row.grace_period_expires_at !== null && row.grace_period_expires_at > now) return "in_grace_period";
+  if (row.revoked_at !== null) {
+    return "revoked";
+  }
+  if (row.expires_at > now) {
+    return "active";
+  }
+  if (row.grace_period_expires_at !== null && row.grace_period_expires_at > now) {
+    return "in_grace_period";
+  }
   return "expired";
 }
 
@@ -63,7 +69,9 @@ export async function subscriptionView(env: Env, memberId: string, now = Date.no
     .map((row) => ({ row, status: statusOf(row, now) }))
     .sort((a, b) => Number(isActive(b.status)) - Number(isActive(a.status)) || b.row.expires_at - a.row.expires_at);
   const best = rows[0];
-  if (!best) return null;
+  if (!best) {
+    return null;
+  }
   return {
     status: best.status,
     store: best.row.store,
@@ -97,11 +105,17 @@ async function verifiedTransaction(env: Env, jws: string): Promise<TransactionPa
   try {
     transaction = await verifySignedData<TransactionPayload>(env, jws);
   } catch (error) {
-    if (error instanceof SignedDataError) throw invalidTransaction(error.message);
+    if (error instanceof SignedDataError) {
+      throw invalidTransaction(error.message);
+    }
     throw error;
   }
-  if (transaction.bundleId !== env.APPLE_CLIENT_ID) throw invalidTransaction("bundle id");
-  if (!ACCEPTED_ENVIRONMENTS.has(transaction.environment)) throw invalidTransaction("environment");
+  if (transaction.bundleId !== env.APPLE_CLIENT_ID) {
+    throw invalidTransaction("bundle id");
+  }
+  if (!ACCEPTED_ENVIRONMENTS.has(transaction.environment)) {
+    throw invalidTransaction("environment");
+  }
   if (transaction.type !== "Auto-Renewable Subscription" || !PLUS_PRODUCT_IDS.has(transaction.productId)) {
     throw invalidTransaction("product");
   }
@@ -191,13 +205,21 @@ export async function handleAppStoreNotification(env: Env, signedPayload: string
   try {
     notification = await verifySignedData<NotificationPayload>(env, signedPayload);
   } catch (error) {
-    if (error instanceof SignedDataError) throw invalidNotification(error.message);
+    if (error instanceof SignedDataError) {
+      throw invalidNotification(error.message);
+    }
     throw error;
   }
   const data = notification.data;
-  if (!data?.signedTransactionInfo) return; // TEST、摘要類通知沒有交易。
-  if (data.bundleId !== env.APPLE_CLIENT_ID) throw invalidNotification("bundle id");
-  if (!data.environment || !ACCEPTED_ENVIRONMENTS.has(data.environment)) throw invalidNotification("environment");
+  if (!data?.signedTransactionInfo) {
+    return;
+  } // TEST、摘要類通知沒有交易。
+  if (data.bundleId !== env.APPLE_CLIENT_ID) {
+    throw invalidNotification("bundle id");
+  }
+  if (!data.environment || !ACCEPTED_ENVIRONMENTS.has(data.environment)) {
+    throw invalidNotification("environment");
+  }
   if (data.environment === "Production" && String(data.appAppleId) !== env.APP_STORE_APP_APPLE_ID) {
     throw invalidNotification("app Apple ID");
   }
@@ -206,16 +228,24 @@ export async function handleAppStoreNotification(env: Env, signedPayload: string
   try {
     transaction = await verifiedTransaction(env, data.signedTransactionInfo);
   } catch (error) {
-    if (error instanceof ApiError) throw invalidNotification(error.message);
+    if (error instanceof ApiError) {
+      throw invalidNotification(error.message);
+    }
     throw error;
   }
   let owner = await ownerOf(env, transaction.originalTransactionId);
   const token = transaction.appAccountToken?.toLowerCase();
-  if (owner === null && token !== undefined && (await memberExists(env, token))) owner = token;
-  if (owner === null) return;
+  if (owner === null && token !== undefined && (await memberExists(env, token))) {
+    owner = token;
+  }
+  if (owner === null) {
+    return;
+  }
 
   await applyTransaction(env, owner, transaction);
-  if (data.signedRenewalInfo) await applyRenewalInfo(env, data.signedRenewalInfo, transaction.originalTransactionId);
+  if (data.signedRenewalInfo) {
+    await applyRenewalInfo(env, data.signedRenewalInfo, transaction.originalTransactionId);
+  }
 }
 
 async function applyRenewalInfo(env: Env, jws: string, originalTransactionId: string): Promise<void> {
@@ -223,7 +253,9 @@ async function applyRenewalInfo(env: Env, jws: string, originalTransactionId: st
   try {
     info = await verifySignedData<RenewalInfoPayload>(env, jws);
   } catch (error) {
-    if (error instanceof SignedDataError) throw invalidNotification(error.message);
+    if (error instanceof SignedDataError) {
+      throw invalidNotification(error.message);
+    }
     throw error;
   }
   if (info.originalTransactionId !== originalTransactionId || typeof info.signedDate !== "number") {

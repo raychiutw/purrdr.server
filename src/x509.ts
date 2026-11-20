@@ -10,21 +10,29 @@ type Node = { tag: number; value: Uint8Array; /** 含 tag 與長度的完整編�
 function readNode(bytes: Uint8Array, offset: number): { node: Node; next: number } {
   const tag = bytes[offset];
   let lengthByte = bytes[offset + 1];
-  if (tag === undefined || lengthByte === undefined) throw new CertificateError("DER 太短");
+  if (tag === undefined || lengthByte === undefined) {
+    throw new CertificateError("DER 太短");
+  }
   let cursor = offset + 2;
   let length = lengthByte;
   if (lengthByte & 0x80) {
     const count = lengthByte & 0x7f;
-    if (count === 0 || count > 4) throw new CertificateError("DER 長度不支援");
+    if (count === 0 || count > 4) {
+      throw new CertificateError("DER 長度不支援");
+    }
     length = 0;
     for (let i = 0; i < count; i++) {
       lengthByte = bytes[cursor++];
-      if (lengthByte === undefined) throw new CertificateError("DER 太短");
+      if (lengthByte === undefined) {
+        throw new CertificateError("DER 太短");
+      }
       length = length * 256 + lengthByte;
     }
   }
   const end = cursor + length;
-  if (end > bytes.length) throw new CertificateError("DER 長度超出範圍");
+  if (end > bytes.length) {
+    throw new CertificateError("DER 長度超出範圍");
+  }
   return { node: { tag, value: bytes.subarray(cursor, end), raw: bytes.subarray(offset, end) }, next: end };
 }
 
@@ -41,12 +49,16 @@ function children(node: Node): Node[] {
 
 function single(bytes: Uint8Array): Node {
   const { node, next } = readNode(bytes, 0);
-  if (next !== bytes.length) throw new CertificateError("DER 後面有多餘的資料");
+  if (next !== bytes.length) {
+    throw new CertificateError("DER 後面有多餘的資料");
+  }
   return node;
 }
 
 function expect(node: Node | undefined, tag: number): Node {
-  if (!node || node.tag !== tag) throw new CertificateError(`預期 tag 0x${tag.toString(16)}`);
+  if (!node || node.tag !== tag) {
+    throw new CertificateError(`預期 tag 0x${tag.toString(16)}`);
+  }
   return node;
 }
 
@@ -56,7 +68,9 @@ const OID_TAG = 0x06;
 function decodeOid(node: Node): string {
   const bytes = expect(node, OID_TAG).value;
   const first = bytes[0];
-  if (first === undefined) throw new CertificateError("OID 是空的");
+  if (first === undefined) {
+    throw new CertificateError("OID 是空的");
+  }
   const parts = [Math.floor(first / 40), first % 40];
   let value = 0;
   for (const byte of bytes.subarray(1)) {
@@ -70,7 +84,9 @@ function decodeOid(node: Node): string {
 }
 
 function decodeTime(node: Node | undefined): number {
-  if (!node) throw new CertificateError("缺少有效期間");
+  if (!node) {
+    throw new CertificateError("缺少有效期間");
+  }
   const text = new TextDecoder().decode(node.value);
   let match: RegExpMatchArray | null;
   if (node.tag === 0x17 && (match = text.match(/^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/))) {
@@ -112,9 +128,13 @@ export function parseCertificate(der: Uint8Array): Certificate {
   const [tbsNode, algorithmNode, signatureNode] = children(expect(single(der), SEQUENCE));
   const tbs = expect(tbsNode, SEQUENCE);
   const signatureHash = SIGNATURE_HASHES[decodeOid(expect(children(expect(algorithmNode, SEQUENCE))[0], OID_TAG))];
-  if (!signatureHash) throw new CertificateError("只接受 ECDSA 簽章");
+  if (!signatureHash) {
+    throw new CertificateError("只接受 ECDSA 簽章");
+  }
   const bits = expect(signatureNode, 0x03).value;
-  if (bits[0] !== 0) throw new CertificateError("簽章 bit string 不完整");
+  if (bits[0] !== 0) {
+    throw new CertificateError("簽章 bit string 不完整");
+  }
 
   const fields = children(tbs);
   // version 是 [0] EXPLICIT;沒有時代表 v1(沒有 extension)。
@@ -125,13 +145,19 @@ export function parseCertificate(der: Uint8Array): Certificate {
   const spki = expect(fields[offset + 5], SEQUENCE);
   const [keyAlgorithm] = children(spki);
   const [keyType, curveOid] = children(expect(keyAlgorithm, SEQUENCE));
-  if (decodeOid(expect(keyType, OID_TAG)) !== "1.2.840.10045.2.1") throw new CertificateError("只接受 EC 公鑰");
+  if (decodeOid(expect(keyType, OID_TAG)) !== "1.2.840.10045.2.1") {
+    throw new CertificateError("只接受 EC 公鑰");
+  }
   const curve = CURVES[decodeOid(expect(curveOid, OID_TAG))];
-  if (!curve) throw new CertificateError("不支援的曲線");
+  if (!curve) {
+    throw new CertificateError("不支援的曲線");
+  }
 
   const extensionOids: string[] = [];
   for (const field of fields.slice(offset + 6)) {
-    if (field.tag !== 0xa3) continue;
+    if (field.tag !== 0xa3) {
+      continue;
+    }
     for (const extension of children(expect(children(field)[0], SEQUENCE))) {
       extensionOids.push(decodeOid(expect(children(expect(extension, SEQUENCE))[0], OID_TAG)));
     }
@@ -162,8 +188,12 @@ function rawSignature(der: Uint8Array, size: number): Uint8Array {
   const out = new Uint8Array(size * 2);
   for (const [index, node] of [r, s].entries()) {
     let value = expect(node, 0x02).value;
-    while (value.length > size && value[0] === 0) value = value.subarray(1);
-    if (value.length > size) throw new CertificateError("簽章長度不對");
+    while (value.length > size && value[0] === 0) {
+      value = value.subarray(1);
+    }
+    if (value.length > size) {
+      throw new CertificateError("簽章長度不對");
+    }
     out.set(value, size * (index + 1) - value.length);
   }
   return out;
@@ -171,7 +201,9 @@ function rawSignature(der: Uint8Array, size: number): Uint8Array {
 
 /// `certificate` 是否由 `issuer` 的私鑰簽發(名稱相符且簽章正確)。
 export async function isIssuedBy(certificate: Certificate, issuer: Certificate): Promise<boolean> {
-  if (!equalBytes(certificate.issuer, issuer.subject)) return false;
+  if (!equalBytes(certificate.issuer, issuer.subject)) {
+    return false;
+  }
   const size = issuer.curve === "P-256" ? 32 : 48;
   return crypto.subtle.verify(
     { name: "ECDSA", hash: certificate.signatureHash },

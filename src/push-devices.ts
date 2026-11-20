@@ -20,12 +20,16 @@ function invalid(message: string): ApiError {
 
 function parseDeviceId(value: string): string {
   const deviceId = value.toLowerCase();
-  if (!DEVICE_ID.test(deviceId)) throw invalid("deviceId must be a UUID.");
+  if (!DEVICE_ID.test(deviceId)) {
+    throw invalid("deviceId must be a UUID.");
+  }
   return deviceId;
 }
 
 export function parseDeviceName(value: string | undefined): string | null {
-  if (value === undefined) return null;
+  if (value === undefined) {
+    return null;
+  }
   const name = value.trim();
   if (name.length === 0 || [...name].length > MAX_NAME_LENGTH || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name)) {
     throw invalid(`deviceName must be 1 to ${MAX_NAME_LENGTH} characters.`);
@@ -37,7 +41,9 @@ export function parseDeviceName(value: string | undefined): string | null {
 export function readDeviceIdentity(body: Record<string, unknown>): DeviceIdentity {
   const deviceId = optionalString(body, "deviceId");
   const model = optionalString(body, "model");
-  if (model !== undefined && !MODELS.has(model)) throw invalid("model must be iPhone or iPad.");
+  if (model !== undefined && !MODELS.has(model)) {
+    throw invalid("model must be iPhone or iPad.");
+  }
   return {
     deviceId: deviceId === undefined ? null : parseDeviceId(deviceId),
     name: parseDeviceName(optionalString(body, "deviceName")),
@@ -47,7 +53,9 @@ export function readDeviceIdentity(body: Record<string, unknown>): DeviceIdentit
 
 /// 記下裝置名稱與型號。已有名稱就保留(使用者改過的名稱不被預設名稱蓋掉)。
 export function saveDeviceStatement(env: Env, memberId: string, device: DeviceIdentity): D1PreparedStatement | null {
-  if (device.deviceId === null) return null;
+  if (device.deviceId === null) {
+    return null;
+  }
   return env.DB.prepare(
     `INSERT INTO push_devices (member_id, device_id, name, model) VALUES (?, ?, ?, ?)
      ON CONFLICT (member_id, device_id) DO UPDATE SET
@@ -126,7 +134,9 @@ async function pairingsOfDevice(env: Env, memberId: string, normalizedDeviceId: 
 
 async function requirePairingsOfDevice(env: Env, memberId: string, normalizedDeviceId: string): Promise<string[]> {
   const keyHashes = await pairingsOfDevice(env, memberId, normalizedDeviceId);
-  if (keyHashes.length === 0) throw new ApiError(404, "device_not_found", "This device doesn't receive notifications.");
+  if (keyHashes.length === 0) {
+    throw new ApiError(404, "device_not_found", "This device doesn't receive notifications.");
+  }
   return keyHashes;
 }
 

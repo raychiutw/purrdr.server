@@ -5,7 +5,9 @@ import { ApiError } from "./http";
 export type Provider = "apple" | "google";
 
 export function parseProvider(value: unknown): Provider {
-  if (value === "apple" || value === "google") return value;
+  if (value === "apple" || value === "google") {
+    return value;
+  }
   throw new ApiError(400, "invalid_request", "provider must be apple or google.");
 }
 
@@ -45,7 +47,9 @@ export async function verifyIdToken(env: Env, provider: Provider, idToken: strin
   if (payload.nonce !== expectedNonce) {
     throw new ApiError(401, "invalid_id_token", "The sign-in credential doesn't match this request.");
   }
-  if (!payload.sub) throw new ApiError(401, "invalid_id_token", "The sign-in credential has no subject.");
+  if (!payload.sub) {
+    throw new ApiError(401, "invalid_id_token", "The sign-in credential has no subject.");
+  }
   const email = typeof payload.email === "string" ? payload.email : null;
   return { provider, subject: payload.sub, email };
 }

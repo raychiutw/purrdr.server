@@ -106,7 +106,9 @@ describe("通知裝置清單", () => {
 
     expect(listed).toHaveLength(2);
     expect(listed.map((device: { hostCount: number }) => device.hostCount).sort()).toEqual([1, 2]);
-    for (const device of listed) expect(device).toMatchObject({ name: null, model: null, current: false });
+    for (const device of listed) {
+      expect(device).toMatchObject({ name: null, model: null, current: false });
+    }
   });
 
   it("只列自己的裝置", async () => {

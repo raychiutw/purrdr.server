@@ -43,7 +43,11 @@ export function requireString(body: Record<string, unknown>, field: string): str
 
 export function optionalString(body: Record<string, unknown>, field: string): string | undefined {
   const value = body[field];
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string") throw new ApiError(400, "invalid_request", `Field ${field} must be a string.`);
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new ApiError(400, "invalid_request", `Field ${field} must be a string.`);
+  }
   return value;
 }
