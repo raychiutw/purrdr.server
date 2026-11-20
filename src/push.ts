@@ -105,8 +105,10 @@ export async function revokePairing(env: Env, memberId: string, keyHash: string)
 
 // MARK: - 送推播(主機外掛)
 
-type StatusPush = { key: string; workspace: string; status: string; pane: string | null };
-type HostServicePush = { key: string; event: string; version: string | null };
+type PushStatus = "blocked" | "done";
+type HostServiceEvent = "host_service_update_available" | "host_service_updated" | "host_service_update_rolled_back";
+type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null };
+type HostServicePush = { kind: "host_service"; key: string; event: HostServiceEvent; version: string | null };
 type PushRequest = StatusPush | HostServicePush;
 
 async function readPushRequest(request: Request): Promise<PushRequest> {
@@ -120,36 +122,48 @@ async function readPushRequest(request: Request): Promise<PushRequest> {
   }
   if (typeof body !== "object" || body === null || Array.isArray(body)) throw invalid("Request body must be a JSON object.");
   const fields = body as Record<string, unknown>;
-  if (fields.event !== undefined) return readHostServicePush(fields);
+  return fields.event === undefined ? readStatusPush(fields) : readHostServicePush(fields);
+}
+
+/// 兩種推播共用：只接受白名單欄位，並驗證配對密鑰。
+function readPushKey(fields: Record<string, unknown>, allowedFields: Set<string>): string {
   for (const field of Object.keys(fields)) {
-    if (!PUSH_FIELDS.has(field)) throw invalid(`Unknown field: ${field}.`);
+    if (!allowedFields.has(field)) throw invalid(`Unknown field: ${field}.`);
   }
   const key = requireString(fields, "key");
+  if (!HEX_64.test(key)) throw invalid("key must be 64 lowercase hex characters.");
+  return key;
+}
+
+function readStatusPush(fields: Record<string, unknown>): StatusPush {
+  const key = readPushKey(fields, PUSH_FIELDS);
   const workspace = requireString(fields, "workspace");
   const status = requireString(fields, "status");
   const pane = fields.pane === undefined ? null : fields.pane;
-  if (!HEX_64.test(key)) throw invalid("key must be 64 lowercase hex characters.");
   if ([...workspace].length > MAX_WORKSPACE_LENGTH) throw invalid("workspace is too long.");
-  if (!Object.hasOwn(STATUS_ALERTS, status)) throw invalid("Unsupported status.");
+  if (!isPushStatus(status)) throw invalid("Unsupported status.");
   if (pane !== null && (typeof pane !== "string" || !PANE_ID.test(pane))) throw invalid("pane must be a herdr pane id.");
-  return { key, workspace, status, pane };
+  return { kind: "status", key, workspace, status, pane };
 }
 
 function readHostServicePush(fields: Record<string, unknown>): HostServicePush {
-  for (const field of Object.keys(fields)) {
-    if (!HOST_SERVICE_PUSH_FIELDS.has(field)) throw invalid(`Unknown field: ${field}.`);
-  }
-  const key = requireString(fields, "key");
+  const key = readPushKey(fields, HOST_SERVICE_PUSH_FIELDS);
   const event = requireString(fields, "event");
   const version = fields.version === undefined ? null : fields.version;
-  if (!HEX_64.test(key)) throw invalid("key must be 64 lowercase hex characters.");
-  if (!Object.hasOwn(HOST_SERVICE_ALERTS, event)) throw invalid("Unsupported event.");
-  const alert = HOST_SERVICE_ALERTS[event]!;
+  if (!isHostServiceEvent(event)) throw invalid("Unsupported event.");
   if (version !== null && (typeof version !== "string" || version.length > MAX_VERSION_LENGTH || !SEMVER.test(version))) {
     throw invalid("version must be a semantic version.");
   }
-  if (alert.withVersion && version === null) throw invalid("version is required for this event.");
-  return { key, event, version };
+  if (HOST_SERVICE_ALERTS[event].withVersion && version === null) throw invalid("version is required for this event.");
+  return { kind: "host_service", key, event, version };
+}
+
+function isPushStatus(value: string): value is PushStatus {
+  return Object.hasOwn(STATUS_ALERTS, value);
+}
+
+function isHostServiceEvent(value: string): value is HostServiceEvent {
+  return Object.hasOwn(HOST_SERVICE_ALERTS, value);
 }
 
 /// 找到配對並計入速率限制(固定一分鐘的視窗，一個 UPDATE 完成，避免同時的請求互相蓋掉計數)。
@@ -183,9 +197,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     throw new ApiError(403, "subscription_required", "This needs an active Purrdr Plus subscription.");
   }
   // 不是錯誤：主機端不需要知道使用者的偏好。
-  const kind = "event" in push ? "host_service" : push.status;
+  const kind = push.kind === "host_service" ? "host_service" : push.status;
   if (!(JSON.parse(pairing.kinds) as string[]).includes(kind)) return false;
-  const hostEvent = "event" in push ? push : null;
+  const hostEvent = push.kind === "host_service" ? push : null;
   if (hostEvent !== null && !(await claimHostServiceEvent(env, keyHash, pairing.member_id, hostEvent, now))) return false;
 
   const response = await deliverToApns(env, pairing, apnsPayload(push, keyHash));
@@ -209,15 +223,20 @@ async function claimHostServiceEvent(env: Env, keyHash: string, memberId: string
      WHERE host_service_push_events.sent_at <= ?
      RETURNING key_hash`,
   )
-    .bind(keyHash, memberId, push.event, push.version ?? "", now, now - HOST_SERVICE_DEDUP_MS)
+    .bind(keyHash, memberId, push.event, dedupVersion(push), now, now - HOST_SERVICE_DEDUP_MS)
     .first();
   return claimed !== null;
 }
 
 async function releaseHostServiceEvent(env: Env, keyHash: string, push: HostServicePush): Promise<void> {
   await env.DB.prepare("DELETE FROM host_service_push_events WHERE key_hash = ? AND event = ? AND version = ?")
-    .bind(keyHash, push.event, push.version ?? "")
+    .bind(keyHash, push.event, dedupVersion(push))
     .run();
+}
+
+/// 去重主鍵的 version:欄位 NOT NULL,沒帶版本存空字串。
+function dedupVersion(push: HostServicePush): string {
+  return push.version ?? "";
 }
 
 function pairingRevoked(): ApiError {
@@ -226,7 +245,7 @@ function pairingRevoked(): ApiError {
 
 /// 各狀態的固定內文(app 的字串表以 `loc-key` 翻譯)、通知類別與中斷等級。
 /// 「需要你」用 Time Sensitive;「完成」用 active,專注模式下不打斷。
-const STATUS_ALERTS: Record<string, { locKey: string; category: string; interruptionLevel: string }> = {
+const STATUS_ALERTS: Record<PushStatus, { locKey: string; category: string; interruptionLevel: string }> = {
   blocked: { locKey: "An agent needs you.", category: "AGENT_BLOCKED", interruptionLevel: "time-sensitive" },
   done: { locKey: "An agent finished.", category: "AGENT_DONE", interruptionLevel: "active" },
 };
@@ -234,8 +253,8 @@ const STATUS_ALERTS: Record<string, { locKey: string; category: string; interrup
 /// APNs payload 由後台組：標題是 workspace 名稱，內文依狀態固定。
 /// 根層的 `pairing`(配對密鑰雜湊)與 `pane` 給 app 點通知時找主機與 Agent。
 export function apnsPayload(push: PushRequest, keyHash: string): Record<string, unknown> {
-  if ("event" in push) return hostServicePayload(push, keyHash);
-  const alert = STATUS_ALERTS[push.status]!;
+  if (push.kind === "host_service") return hostServicePayload(push, keyHash);
+  const alert = STATUS_ALERTS[push.status];
   return {
     aps: {
       alert: { title: push.workspace, "loc-key": alert.locKey },
@@ -251,7 +270,7 @@ export function apnsPayload(push: PushRequest, keyHash: string): Record<string, 
 }
 
 /// 各主機服務事件的內文(app 的字串表以 `loc-key` 翻譯);「已更新」以 `loc-args` 帶入版本。
-const HOST_SERVICE_ALERTS: Record<string, { locKey: string; withVersion: boolean }> = {
+const HOST_SERVICE_ALERTS: Record<HostServiceEvent, { locKey: string; withVersion: boolean }> = {
   host_service_update_available: { locKey: "A host service update is available.", withVersion: false },
   host_service_updated: { locKey: "Host service updated to %@.", withVersion: true },
   host_service_update_rolled_back: { locKey: "Host service update failed and was rolled back.", withVersion: false },
@@ -259,11 +278,10 @@ const HOST_SERVICE_ALERTS: Record<string, { locKey: string; withVersion: boolean
 
 /// 主機服務事件：標題固定「Host service」(不帶主機名稱或對話),passive 不出聲打斷。
 function hostServicePayload(push: HostServicePush, keyHash: string): Record<string, unknown> {
-  const alert = HOST_SERVICE_ALERTS[push.event]!;
+  const alert = HOST_SERVICE_ALERTS[push.event];
   return {
     aps: {
       alert: { "title-loc-key": "Host service", "loc-key": alert.locKey, ...(alert.withVersion ? { "loc-args": [push.version] } : {}) },
-      sound: "default",
       "interruption-level": "passive",
       category: "HOST_SERVICE_EVENT",
     },

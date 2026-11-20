@@ -439,17 +439,17 @@ describe("Agent 完成(done)與種類偏好", () => {
   });
 });
 
+const hostEvent = (key: string, event: string, version?: string) => ({ key, event, ...(version === undefined ? {} : { version }) });
+
+async function hostServicePairing(kinds: string[] = ["blocked", "host_service"]) {
+  const me = await subscribedMember();
+  const key = pairingKey();
+  expect((await register(me.accessToken, key, { kinds })).status).toBe(201);
+  return { me, key };
+}
+
 describe("主機服務事件(有新版、已更新、已退回)", () => {
-  const hostEvent = (key: string, event: string, version?: string) => ({ key, event, ...(version === undefined ? {} : { version }) });
-
-  async function hostServicePairing(kinds: string[] = ["blocked", "host_service"]) {
-    const me = await subscribedMember();
-    const key = pairingKey();
-    expect((await register(me.accessToken, key, { kinds })).status).toBe(201);
-    return { me, key };
-  }
-
-  it("已更新：轉給 APNs,標題「Host service」、內文帶版本、HOST_SERVICE_EVENT、passive,根層 event 與 version", async () => {
+  it("已更新：轉給 APNs,標題「Host service」、內文帶版本、HOST_SERVICE_EVENT、passive 不帶 sound,根層 event 與 version", async () => {
     const { key } = await hostServicePairing();
 
     const sent = await push(hostEvent(key, "host_service_updated", "0.7.0"));
@@ -460,7 +460,6 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { "title-loc-key": "Host service", "loc-key": "Host service updated to %@.", "loc-args": ["0.7.0"] },
-        sound: "default",
         "interruption-level": "passive",
         category: "HOST_SERVICE_EVENT",
       },
@@ -481,7 +480,6 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { "title-loc-key": "Host service", "loc-key": locKey },
-        sound: "default",
         "interruption-level": "passive",
         category: "HOST_SERVICE_EVENT",
       },
@@ -611,15 +609,7 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
 });
 
 describe("主機服務事件去重(同一組密鑰＋event＋version 24 小時一次)", () => {
-  const hostEvent = (key: string, event: string, version?: string) => ({ key, event, ...(version === undefined ? {} : { version }) });
   const HOUR = 60 * 60_000;
-
-  async function hostServicePairing() {
-    const me = await subscribedMember();
-    const key = pairingKey();
-    await register(me.accessToken, key, { kinds: ["blocked", "done", "host_service"] });
-    return { me, key };
-  }
 
   let clock: MockInstance<typeof Date.now> | undefined;
 
@@ -699,7 +689,7 @@ describe("主機服務事件去重(同一組密鑰＋event＋version 24 小時�
   });
 
   it("done 不去重：同一個 workspace 連送兩次都轉給 APNs", async () => {
-    const { key } = await hostServicePairing();
+    const { key } = await hostServicePairing(["done", "host_service"]);
     const done = { key, workspace: "weather-app", status: "done", pane: "w2:p1" };
 
     expect((await push(done)).body).toEqual({ delivered: true });
