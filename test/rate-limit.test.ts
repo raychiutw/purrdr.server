@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { api } from "./fakes";
 
 /// 每個 IP(`CF-Connecting-IP`)60 秒最多 60 次(#2)。限流視窗對齊時鐘，測試期間可能剛好換窗，
-/// 所以不斷言「第 61 次」,而是：新 IP 的前 60 次都放行，連送 120 次一定會撞到 429。
+/// 所以不斷言「第 61 次」,而是：新 IP 的前 60 次都放行，連送 121 次一定會撞到 429(最多跨兩個視窗，必有一個 ≥ 61 次)。
 
 function uniqueIp(): string {
   const [a, b, c] = crypto.getRandomValues(new Uint8Array(3));
@@ -17,9 +17,10 @@ async function burst(method: string, path: string, ip: string, count: number, bo
   return responses;
 }
 
-describe("每個 IP 的限流", () => {
-  it("同一個 IP 前 60 次放行，之後回 429 rate_limited 並帶 Retry-After", { timeout: 20000 }, async () => {
-    const responses = await burst("GET", "/v1/members/me", uniqueIp(), 120);
+// 每個測試連送 120 次以上，並行跑全部測試時可能超過預設 5 秒。
+describe("每個 IP 的限流", { timeout: 20000 }, () => {
+  it("同一個 IP 前 60 次放行，之後回 429 rate_limited 並帶 Retry-After", async () => {
+    const responses = await burst("GET", "/v1/members/me", uniqueIp(), 121);
 
     expect(responses.slice(0, 60).every((response) => response.status === 401)).toBe(true);
     const limited = responses.find((response) => response.status === 429);
@@ -29,7 +30,7 @@ describe("每個 IP 的限流", () => {
 
   it("一個 IP 被限流不影響另一個 IP", async () => {
     const limitedIp = uniqueIp();
-    await burst("GET", "/v1/members/me", limitedIp, 120);
+    await burst("GET", "/v1/members/me", limitedIp, 121);
 
     const [other] = await burst("GET", "/v1/members/me", uniqueIp(), 1);
 
