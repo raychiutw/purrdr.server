@@ -9,6 +9,8 @@ const MODELS = new Set(["iPhone", "iPad"]);
 const MAX_NAME_LENGTH = 64;
 /// 舊版 app 註冊的配對沒有 device id,以 device token 的雜湊當識別(不洩漏 token)。
 const LEGACY_PREFIX = "legacy-";
+/// 遠端關閉紀錄保留 90 天;外掛多半在下一次推播就收到 410 並清掉本機配對。
+const REVOKED_PAIRING_RETENTION_MS = 90 * 24 * 60 * 60_000;
 
 export type DeviceIdentity = { deviceId: string | null; name: string | null; model: string | null };
 
@@ -25,7 +27,7 @@ function parseDeviceId(value: string): string {
 export function parseDeviceName(value: string | undefined): string | null {
   if (value === undefined) return null;
   const name = value.trim();
-  if (name.length === 0 || [...name].length > MAX_NAME_LENGTH || /[\u0000-\u001f\u007f]/.test(name)) {
+  if (name.length === 0 || [...name].length > MAX_NAME_LENGTH || /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(name)) {
     throw invalid(`deviceName must be 1 to ${MAX_NAME_LENGTH} characters.`);
   }
   return name;
@@ -58,7 +60,9 @@ async function legacyDeviceId(deviceToken: string): Promise<string> {
   return LEGACY_PREFIX + [...new Uint8Array(digest).slice(0, 16)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-type DeviceRow = { device_id: string | null; device_token: string; host_count: number; last_registered_at: number; name: string | null; model: string | null };
+type PairingRow = { key_hash: string; device_id: string | null; device_token: string; updated_at: number };
+/// 一組配對與它歸屬的裝置 id(舊版 app 的配對以 device token 推出)。
+type DevicePairing = { keyHash: string; deviceId: string; updatedAt: number };
 
 export type PushDeviceView = {
   deviceId: string;
@@ -69,72 +73,74 @@ export type PushDeviceView = {
   current: boolean;
 };
 
-/// GET /v1/members/me/push-devices:會收到通知的裝置(至少一組配對)。`currentDeviceId` 標出呼叫者自己。
-export async function listDevices(env: Env, memberId: string, currentDeviceId: string | null): Promise<PushDeviceView[]> {
-  await requireActiveSubscription(env, memberId);
-  return devicesOf(env, memberId, currentDeviceId);
-}
-
-async function devicesOf(env: Env, memberId: string, currentDeviceId: string | null): Promise<PushDeviceView[]> {
-  const { results } = await env.DB.prepare(
-    `SELECT p.device_id, MIN(p.device_token) AS device_token, COUNT(*) AS host_count, MAX(p.updated_at) AS last_registered_at,
-            d.name, d.model
-     FROM push_pairings p
-     LEFT JOIN push_devices d ON d.member_id = p.member_id AND d.device_id = p.device_id
-     WHERE p.member_id = ?
-     GROUP BY COALESCE(p.device_id, 'token:' || p.device_token)
-     ORDER BY last_registered_at DESC`,
-  )
+/// 會員的所有配對與各自的裝置 id。在這裡歸類：舊版 app 的裝置改名後記下 id 的配對，與之後新增、還沒有 id 的配對仍是同一台。
+async function pairingsOfMember(env: Env, memberId: string): Promise<DevicePairing[]> {
+  const { results } = await env.DB.prepare("SELECT key_hash, device_id, device_token, updated_at FROM push_pairings WHERE member_id = ?")
     .bind(memberId)
-    .all<DeviceRow>();
-  const current = currentDeviceId?.toLowerCase() ?? null;
+    .all<PairingRow>();
   return Promise.all(
-    results.map(async (row) => {
-      const deviceId = row.device_id ?? (await legacyDeviceId(row.device_token));
-      return {
-        deviceId,
-        name: row.name,
-        model: row.model,
-        hostCount: row.host_count,
-        lastRegisteredAt: row.last_registered_at,
-        current: deviceId === current,
-      };
-    }),
+    results.map(async (row) => ({
+      keyHash: row.key_hash,
+      deviceId: row.device_id ?? (await legacyDeviceId(row.device_token)),
+      updatedAt: row.updated_at,
+    })),
   );
 }
 
-/// 這支裝置的所有配對(只找自己的)。舊版 app 的裝置以 device token 的雜湊比對。
-async function pairingsOfDevice(env: Env, memberId: string, deviceId: string): Promise<string[]> {
-  const id = deviceId.toLowerCase();
-  if (!id.startsWith(LEGACY_PREFIX)) {
-    const { results } = await env.DB.prepare("SELECT key_hash FROM push_pairings WHERE member_id = ? AND device_id = ?")
-      .bind(memberId, id)
-      .all<{ key_hash: string }>();
-    return results.map((row) => row.key_hash);
-  }
-  const { results } = await env.DB.prepare("SELECT key_hash, device_token FROM push_pairings WHERE member_id = ? AND device_id IS NULL")
+/// GET /v1/members/me/push-devices:會收到通知的裝置(至少一組配對)。`currentDeviceId` 標出呼叫者自己。
+/// 不需要訂閱：到期後仍要能看到並關閉遺失的裝置。
+export async function listDevices(env: Env, memberId: string, currentDeviceId: string | null): Promise<PushDeviceView[]> {
+  const pairings = await pairingsOfMember(env, memberId);
+  const { results: savedDevices } = await env.DB.prepare("SELECT device_id, name, model FROM push_devices WHERE member_id = ?")
     .bind(memberId)
-    .all<{ key_hash: string; device_token: string }>();
-  const matches = await Promise.all(results.map(async (row) => ((await legacyDeviceId(row.device_token)) === id ? row.key_hash : null)));
-  return matches.filter((keyHash): keyHash is string => keyHash !== null);
+    .all<{ device_id: string; name: string | null; model: string | null }>();
+  const savedById = new Map(savedDevices.map((device) => [device.device_id, device]));
+  const normalizedCurrentDeviceId = currentDeviceId?.toLowerCase() ?? null;
+  const devicesById = new Map<string, PushDeviceView>();
+  for (const pairing of pairings) {
+    const existing = devicesById.get(pairing.deviceId);
+    if (existing) {
+      existing.hostCount += 1;
+      existing.lastRegisteredAt = Math.max(existing.lastRegisteredAt, pairing.updatedAt);
+      continue;
+    }
+    const saved = savedById.get(pairing.deviceId);
+    devicesById.set(pairing.deviceId, {
+      deviceId: pairing.deviceId,
+      name: saved?.name ?? null,
+      model: saved?.model ?? null,
+      hostCount: 1,
+      lastRegisteredAt: pairing.updatedAt,
+      current: pairing.deviceId === normalizedCurrentDeviceId,
+    });
+  }
+  return [...devicesById.values()].sort((first, second) => second.lastRegisteredAt - first.lastRegisteredAt);
 }
 
-async function requirePairingsOfDevice(env: Env, memberId: string, deviceId: string): Promise<string[]> {
-  const keyHashes = await pairingsOfDevice(env, memberId, deviceId);
+/// 這支裝置的所有配對(只找自己的)。
+async function pairingsOfDevice(env: Env, memberId: string, normalizedDeviceId: string): Promise<string[]> {
+  return (await pairingsOfMember(env, memberId))
+    .filter((pairing) => pairing.deviceId === normalizedDeviceId)
+    .map((pairing) => pairing.keyHash);
+}
+
+async function requirePairingsOfDevice(env: Env, memberId: string, normalizedDeviceId: string): Promise<string[]> {
+  const keyHashes = await pairingsOfDevice(env, memberId, normalizedDeviceId);
   if (keyHashes.length === 0) throw new ApiError(404, "device_not_found", "This device doesn't receive notifications.");
   return keyHashes;
 }
 
 /// DELETE /v1/members/me/push-devices/{deviceId}:撤銷這支裝置在所有主機的配對，主機外掛之後送推播會收到 410。
 export async function revokeDevice(env: Env, memberId: string, deviceId: string): Promise<void> {
-  const keyHashes = await requirePairingsOfDevice(env, memberId, deviceId);
+  const keyHashes = await requirePairingsOfDevice(env, memberId, deviceId.toLowerCase());
   const now = Date.now();
-  await env.DB.batch(
-    keyHashes.flatMap((keyHash) => [
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM revoked_push_pairings WHERE revoked_at < ?").bind(now - REVOKED_PAIRING_RETENTION_MS),
+    ...keyHashes.flatMap((keyHash) => [
       env.DB.prepare("INSERT OR REPLACE INTO revoked_push_pairings (key_hash, member_id, revoked_at) VALUES (?, ?, ?)").bind(keyHash, memberId, now),
       env.DB.prepare("DELETE FROM push_pairings WHERE key_hash = ? AND member_id = ?").bind(keyHash, memberId),
     ]),
-  );
+  ]);
 }
 
 /// PATCH /v1/members/me/push-devices/{deviceId}:改名(body `{ name }`)。舊版 app 的裝置改名後以清單上的 id 記下。
@@ -147,14 +153,16 @@ export async function renameDevice(
 ): Promise<PushDeviceView> {
   const name = parseDeviceName(optionalString(await readJson(request), "name") ?? "");
   await requireActiveSubscription(env, memberId);
-  const id = deviceId.toLowerCase();
-  const keyHashes = await requirePairingsOfDevice(env, memberId, id);
+  const normalizedDeviceId = deviceId.toLowerCase();
+  const keyHashes = await requirePairingsOfDevice(env, memberId, normalizedDeviceId);
   await env.DB.batch([
-    ...keyHashes.map((keyHash) => env.DB.prepare("UPDATE push_pairings SET device_id = ? WHERE key_hash = ? AND member_id = ?").bind(id, keyHash, memberId)),
+    ...keyHashes.map((keyHash) =>
+      env.DB.prepare("UPDATE push_pairings SET device_id = ? WHERE key_hash = ? AND member_id = ?").bind(normalizedDeviceId, keyHash, memberId),
+    ),
     env.DB.prepare(
       `INSERT INTO push_devices (member_id, device_id, name) VALUES (?, ?, ?)
        ON CONFLICT (member_id, device_id) DO UPDATE SET name = excluded.name`,
-    ).bind(memberId, id, name),
+    ).bind(memberId, normalizedDeviceId, name),
   ]);
-  return (await devicesOf(env, memberId, currentDeviceId)).find((device) => device.deviceId === id)!;
+  return (await listDevices(env, memberId, currentDeviceId)).find((device) => device.deviceId === normalizedDeviceId)!;
 }

@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { submitTransaction } from "./app-store";
+import { DAY, submitTransaction } from "./app-store";
 import { api, identityProviders, signInWithApple } from "./fakes";
 
 /// 通知裝置(purrdr.server#5):會員看得到哪些裝置會收到通知，可以遠端關閉或改名，不必拿到那支裝置。
@@ -46,6 +46,21 @@ async function enable(accessToken: string, device: Device, extra: Record<string,
 function devices(accessToken: string, currentDeviceId?: string) {
   const query = currentDeviceId === undefined ? "" : `?currentDeviceId=${currentDeviceId}`;
   return api("GET", `/v1/members/me/push-devices${query}`, { accessToken });
+}
+
+/// 訂閱已到期、手機在一台主機開過通知的會員。
+async function expiredMemberWithPhone() {
+  const signIn = await signInWithApple("apple-user-expired");
+  const me = { accessToken: signIn.body.accessToken as string, id: signIn.body.member.id as string };
+  const purchaseDate = Date.now() - 40 * DAY;
+  await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
+  await env.DB.prepare(
+    `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, device_id, created_at, updated_at)
+     VALUES (?, ?, 'apns', ?, 'production', ?, 0, 0)`,
+  )
+    .bind(await hashOf(pairingKey()), me.id, PHONE_TOKEN, PHONE_ID)
+    .run();
+  return me;
 }
 
 function push(key: string) {
@@ -102,13 +117,15 @@ describe("通知裝置清單", () => {
     expect((await devices(me.accessToken)).body.devices).toEqual([]);
   });
 
-  it("沒有有效訂閱時拒絕(403 subscription_required)", async () => {
-    const signIn = await signInWithApple("apple-user-3");
+  it("訂閱到期後仍看得到清單，也能關閉裝置(遺失的手機)", async () => {
+    const me = await expiredMemberWithPhone();
 
-    const listed = await devices(signIn.body.accessToken);
+    const listed = await devices(me.accessToken);
+    const revoked = await revokeDevice(me.accessToken, PHONE_ID);
 
-    expect(listed.status).toBe(403);
-    expect(listed.body.error.code).toBe("subscription_required");
+    expect(listed.status).toBe(200);
+    expect(listed.body.devices).toEqual([expect.objectContaining({ deviceId: PHONE_ID, hostCount: 1 })]);
+    expect(revoked.status).toBe(204);
   });
 
   it("沒帶存取權杖時拒絕", async () => {
@@ -235,10 +252,47 @@ describe("裝置改名", () => {
     expect((await devices(other.accessToken)).body.devices[0].name).toBe("Ray 的 iPhone");
   });
 
-  it("沒有有效訂閱時拒絕(403 subscription_required)", async () => {
-    const signIn = await signInWithApple("apple-user-3");
-    const renamed = await rename(signIn.body.accessToken, PHONE_ID, "我的");
+  it("訂閱到期後不能改名(403 subscription_required)", async () => {
+    const me = await expiredMemberWithPhone();
+    const renamed = await rename(me.accessToken, PHONE_ID, "我的");
     expect(renamed.status).toBe(403);
+    expect(renamed.body.error.code).toBe("subscription_required");
+  });
+
+  it.each([
+    ["C1 控制字元", "手機\u0085"],
+    ["bidi 覆寫", "\u202Eenohpi"],
+    ["零寬字元", "手\u200B機"],
+    ["行分隔", "手機\u2028第二行"],
+    ["段落分隔", "手機\u2029第二段"],
+  ])("名稱含%s時回 400 invalid_request", async (_, name) => {
+    const me = await subscribedMember();
+    await enable(me.accessToken, phone);
+    expect((await rename(me.accessToken, PHONE_ID, name)).status).toBe(400);
+  });
+
+  it("舊版 app 的裝置改名後，仍能再改名與撤銷", async () => {
+    const me = await subscribedMember();
+    const legacyKey = await enable(me.accessToken, { deviceToken: PHONE_TOKEN });
+    const [legacy] = (await devices(me.accessToken)).body.devices;
+    await rename(me.accessToken, legacy.deviceId, "書房 iPad");
+
+    expect((await rename(me.accessToken, legacy.deviceId, "客廳 iPad")).status).toBe(200);
+    expect((await revokeDevice(me.accessToken, legacy.deviceId)).status).toBe(204);
+    expect((await push(legacyKey)).status).toBe(410);
+  });
+
+  it("舊版 app 的裝置改名後再開一台主機，清單仍是同一台裝置", async () => {
+    const me = await subscribedMember();
+    await enable(me.accessToken, { deviceToken: PHONE_TOKEN });
+    const [legacy] = (await devices(me.accessToken)).body.devices;
+    await rename(me.accessToken, legacy.deviceId, "書房 iPad");
+
+    await enable(me.accessToken, { deviceToken: PHONE_TOKEN });
+
+    expect((await devices(me.accessToken)).body.devices).toEqual([
+      expect.objectContaining({ deviceId: legacy.deviceId, name: "書房 iPad", hostCount: 2 }),
+    ]);
   });
 });
 
@@ -276,5 +330,34 @@ describe("註冊配對帶裝置欄位", () => {
       body: { name: "我的" },
     });
     expect(renamed.body.device.current).toBe(true);
+  });
+});
+
+describe("遠端關閉紀錄的清理", () => {
+  it("被關閉的密鑰第一次推播回 410 後就清掉紀錄，之後回 404 pairing_not_found", async () => {
+    const me = await subscribedMember();
+    const key = await enable(me.accessToken, phone);
+    await revokeDevice(me.accessToken, PHONE_ID);
+
+    expect((await push(key)).status).toBe(410);
+    const again = await push(key);
+
+    expect(again.status).toBe(404);
+    expect(again.body.error.code).toBe("pairing_not_found");
+  });
+
+  it("關閉裝置時順手刪掉 90 天前的關閉紀錄", async () => {
+    const me = await subscribedMember();
+    const staleKey = pairingKey();
+    const recentKey = pairingKey();
+    for (const [key, revokedAt] of [[staleKey, Date.now() - 91 * DAY], [recentKey, Date.now() - 89 * DAY]] as const) {
+      await env.DB.prepare("INSERT INTO revoked_push_pairings (key_hash, member_id, revoked_at) VALUES (?, ?, ?)").bind(await hashOf(key), me.id, revokedAt).run();
+    }
+    await enable(me.accessToken, phone);
+
+    await revokeDevice(me.accessToken, PHONE_ID);
+
+    expect((await push(staleKey)).status).toBe(404);
+    expect((await push(recentKey)).status).toBe(410);
   });
 });

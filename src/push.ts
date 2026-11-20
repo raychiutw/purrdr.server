@@ -131,7 +131,8 @@ export async function sendPush(env: Env, request: Request): Promise<void> {
   const keyHash = await pairingKeyHash(push.key);
   const pairing = await takePairing(env, keyHash, Date.now());
   if (pairing === null) {
-    const revoked = await env.DB.prepare("SELECT 1 FROM revoked_push_pairings WHERE key_hash = ?").bind(keyHash).first();
+    // 只回一次 410:外掛收到後會清掉本機配對，之後同一組密鑰當成不認得。
+    const revoked = await env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ? RETURNING key_hash").bind(keyHash).first();
     if (revoked !== null) throw pairingRevoked();
     throw new ApiError(404, "pairing_not_found", "This pairing isn't registered. Turn notifications on again in Purrdr.");
   }
