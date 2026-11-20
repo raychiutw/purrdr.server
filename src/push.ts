@@ -1,5 +1,6 @@
 import { importPKCS8, SignJWT } from "jose";
 import { ApiError, readJson, requireString } from "./http";
+import { readDeviceIdentity, saveDeviceStatement } from "./push-devices";
 import { hasActiveSubscription, requireActiveSubscription } from "./subscriptions";
 
 /// 推播(#29、ADR-0004、ADR-0007)。
@@ -54,21 +55,27 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
   if (platform !== "apns") throw invalid("Unsupported platform.");
   if (!DEVICE_TOKEN.test(deviceToken)) throw invalid("deviceToken must be hex.");
   if (!ENVIRONMENTS.has(environment)) throw invalid("environment must be production or sandbox.");
+  const device = readDeviceIdentity(body);
   await requireActiveSubscription(env, memberId);
 
   const now = Date.now();
   const saved = await env.DB.prepare(
-    `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, device_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (key_hash) DO UPDATE SET
        platform = excluded.platform, device_token = excluded.device_token, environment = excluded.environment,
-       updated_at = excluded.updated_at
+       device_id = COALESCE(excluded.device_id, push_pairings.device_id), updated_at = excluded.updated_at
      WHERE push_pairings.member_id = excluded.member_id
      RETURNING key_hash`,
   )
-    .bind(keyHash, memberId, platform, deviceToken, environment, now, now)
+    .bind(keyHash, memberId, platform, deviceToken, environment, device.deviceId, now, now)
     .first();
   if (saved === null) throw new ApiError(409, "pairing_in_use", "This pairing key belongs to another member.");
+  const saveDevice = saveDeviceStatement(env, memberId, device);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ?").bind(keyHash),
+    ...(saveDevice === null ? [] : [saveDevice]),
+  ]);
 }
 
 /// DELETE /v1/members/me/push-pairings/{keyHash}:撤銷(只刪自己的;不存在也算成功)。不需要有效訂閱。
@@ -123,7 +130,12 @@ export async function sendPush(env: Env, request: Request): Promise<void> {
   const push = await readPushRequest(request);
   const keyHash = await pairingKeyHash(push.key);
   const pairing = await takePairing(env, keyHash, Date.now());
-  if (pairing === null) throw new ApiError(404, "pairing_not_found", "This pairing isn't registered. Turn notifications on again in Purrdr.");
+  if (pairing === null) {
+    // 只回一次 410:外掛收到後會清掉本機配對，之後同一組密鑰當成不認得。
+    const revoked = await env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ? RETURNING key_hash").bind(keyHash).first();
+    if (revoked !== null) throw pairingRevoked();
+    throw new ApiError(404, "pairing_not_found", "This pairing isn't registered. Turn notifications on again in Purrdr.");
+  }
   if (pairing.rate_count > PUSH_RATE_LIMIT) throw new ApiError(429, "rate_limited", "Too many notifications. Try again in a minute.");
   if (!(await hasActiveSubscription(env, pairing.member_id))) {
     throw new ApiError(403, "subscription_required", "This needs an active Purrdr Plus subscription.");
@@ -134,9 +146,13 @@ export async function sendPush(env: Env, request: Request): Promise<void> {
   const reason = await apnsReason(response);
   if (response.status === 410 || DEAD_TOKEN_REASONS.has(reason)) {
     await env.DB.prepare("DELETE FROM push_pairings WHERE key_hash = ?").bind(keyHash).run();
-    throw new ApiError(410, "pairing_revoked", "This device no longer accepts notifications. Turn notifications on again in Purrdr.");
+    throw pairingRevoked();
   }
   throw new ApiError(502, "apns_failed", `Apple Push Notification service refused the notification (${reason || response.status}).`);
+}
+
+function pairingRevoked(): ApiError {
+  return new ApiError(410, "pairing_revoked", "This device no longer accepts notifications. Turn notifications on again in Purrdr.");
 }
 
 /// APNs payload 由後台組：標題是 workspace 名稱，內文是固定句子(app 的字串表以 `loc-key` 翻譯),

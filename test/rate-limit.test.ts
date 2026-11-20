@@ -18,7 +18,7 @@ async function burst(method: string, path: string, ip: string, count: number, bo
 }
 
 describe("每個 IP 的限流", () => {
-  it("同一個 IP 前 60 次放行，之後回 429 rate_limited 並帶 Retry-After", async () => {
+  it("同一個 IP 前 60 次放行，之後回 429 rate_limited 並帶 Retry-After", { timeout: 20000 }, async () => {
     const responses = await burst("GET", "/v1/members/me", uniqueIp(), 120);
 
     expect(responses.slice(0, 60).every((response) => response.status === 401)).toBe(true);

@@ -15,6 +15,7 @@ import {
 } from "./members";
 import { syncHosts } from "./host-sync";
 import { registerPairing, revokePairing, sendPush } from "./push";
+import { listDevices, renameDevice, revokeDevice } from "./push-devices";
 import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
 import { authenticate, issueTokens, revokeRefreshToken, rotateRefreshToken } from "./tokens";
 
@@ -46,13 +47,23 @@ async function enforceIpRateLimit(request: Request, env: Env, key: string): Prom
 }
 
 async function route(request: Request, env: Env): Promise<Response> {
-  const { pathname } = new URL(request.url);
+  const url = new URL(request.url);
+  const { pathname } = url;
   const key = `${request.method} ${pathname}`;
   await enforceIpRateLimit(request, env, key);
   const pairingPath = /^DELETE \/v1\/members\/me\/push-pairings\/([^/]+)$/.exec(key);
   if (pairingPath) {
     await revokePairing(env, await authenticate(env, request), decodeURIComponent(pairingPath[1]!));
     return new Response(null, { status: 204 });
+  }
+  const devicePath = /^(DELETE|PATCH) \/v1\/members\/me\/push-devices\/([^/]+)$/.exec(key);
+  if (devicePath?.[1] === "DELETE") {
+    await revokeDevice(env, await authenticate(env, request), decodeURIComponent(devicePath[2]!));
+    return new Response(null, { status: 204 });
+  }
+  if (devicePath?.[1] === "PATCH") {
+    const memberId = await authenticate(env, request);
+    return json({ device: await renameDevice(env, memberId, decodeURIComponent(devicePath[2]!), request, url.searchParams.get("currentDeviceId")) });
   }
   switch (key) {
     case "POST /v1/sessions":
@@ -89,6 +100,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     case "POST /v1/members/me/push-pairings":
       await registerPairing(env, await authenticate(env, request), request);
       return json({ registered: true }, 201);
+    case "GET /v1/members/me/push-devices": {
+      const memberId = await authenticate(env, request);
+      return json({ devices: await listDevices(env, memberId, url.searchParams.get("currentDeviceId")) });
+    }
     case "POST /v1/push":
       await sendPush(env, request);
       return json({ delivered: true });
