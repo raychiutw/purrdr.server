@@ -5,9 +5,9 @@ import { hasActiveSubscription, requireActiveSubscription } from "./subscription
 
 /// 推播(#29、ADR-0004、ADR-0007)。
 ///
-/// - app(會員)註冊推播配對：送配對密鑰的雜湊、APNs device token 與環境;需要有效訂閱。
-/// - 主機外掛在 Agent「需要你」時帶密鑰呼叫 `POST /v1/push`:後台算雜湊找到配對、每組密鑰限速、
-///   確認會員仍有有效訂閱，再自己組 APNs payload 轉送。外掛只能送 workspace 名稱、狀態與 pane id,
+/// - app(會員)註冊推播配對：送配對密鑰的雜湊、APNs device token、環境與要收的種類;需要有效訂閱。
+/// - 主機外掛在 Agent「需要你」或「完成」時帶密鑰呼叫 `POST /v1/push`:後台算雜湊找到配對、每組密鑰限速、
+///   確認會員仍有有效訂閱與種類偏好，再自己組 APNs payload 轉送。外掛只能送 workspace 名稱、狀態與 pane id,
 ///   多帶任何欄位(例如對話內容)一律拒絕，所以對話內容不會經過後台或 APNs。
 
 const HEX_64 = /^[0-9a-f]{64}$/;
@@ -16,7 +16,8 @@ const PANE_ID = /^[A-Za-z0-9:_.-]{1,64}$/;
 const ENVIRONMENTS = new Set(["production", "sandbox"]);
 /// 外掛可以送的欄位;其他一律拒絕。
 const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane"]);
-const PUSH_STATUSES = new Set(["blocked"]);
+/// 配對可以選擇要收的推播種類(`host_service` = 主機服務事件)。
+const PAIRING_KINDS = new Set(["blocked", "done", "host_service"]);
 const MAX_WORKSPACE_LENGTH = 100;
 const MAX_PUSH_BODY_BYTES = 2048;
 
@@ -28,7 +29,7 @@ const APNS_ORIGINS = { production: "https://api.push.apple.com", sandbox: "https
 /// APNs 表示「這個 token 不能再用」的回應：刪掉配對，讓外掛與 app 知道要重新配對。
 const DEAD_TOKEN_REASONS = new Set(["BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"]);
 
-type Pairing = { member_id: string; device_token: string; environment: keyof typeof APNS_ORIGINS; rate_count: number };
+type Pairing = { member_id: string; device_token: string; environment: keyof typeof APNS_ORIGINS; rate_count: number; kinds: string };
 
 function invalid(message: string): ApiError {
   return new ApiError(400, "invalid_request", message);
@@ -56,19 +57,21 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
   if (!DEVICE_TOKEN.test(deviceToken)) throw invalid("deviceToken must be hex.");
   if (!ENVIRONMENTS.has(environment)) throw invalid("environment must be production or sandbox.");
   const device = readDeviceIdentity(body);
+  const kinds = readKinds(body);
   await requireActiveSubscription(env, memberId);
 
   const now = Date.now();
   const saved = await env.DB.prepare(
-    `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, device_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, device_id, kinds, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, '["blocked"]'), ?, ?)
      ON CONFLICT (key_hash) DO UPDATE SET
        platform = excluded.platform, device_token = excluded.device_token, environment = excluded.environment,
-       device_id = COALESCE(excluded.device_id, push_pairings.device_id), updated_at = excluded.updated_at
+       device_id = COALESCE(excluded.device_id, push_pairings.device_id),
+       kinds = COALESCE(?, push_pairings.kinds), updated_at = excluded.updated_at
      WHERE push_pairings.member_id = excluded.member_id
      RETURNING key_hash`,
   )
-    .bind(keyHash, memberId, platform, deviceToken, environment, device.deviceId, now, now)
+    .bind(keyHash, memberId, platform, deviceToken, environment, device.deviceId, kinds, now, now, kinds)
     .first();
   if (saved === null) throw new ApiError(409, "pairing_in_use", "This pairing key belongs to another member.");
   const saveDevice = saveDeviceStatement(env, memberId, device);
@@ -76,6 +79,16 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
     env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ?").bind(keyHash),
     ...(saveDevice === null ? [] : [saveDevice]),
   ]);
+}
+
+/// 選用的 `kinds`:要收的推播種類，存成 JSON 字串;沒帶回 null(新配對預設只收 blocked,既有配對保留原偏好)。
+function readKinds(body: Record<string, unknown>): string | null {
+  const kinds = body.kinds;
+  if (kinds === undefined) return null;
+  if (!Array.isArray(kinds) || !kinds.every((kind) => typeof kind === "string" && PAIRING_KINDS.has(kind))) {
+    throw invalid("kinds must be an array of blocked, done or host_service.");
+  }
+  return JSON.stringify([...new Set(kinds)]);
 }
 
 /// DELETE /v1/members/me/push-pairings/{keyHash}:撤銷(只刪自己的;不存在也算成功)。不需要有效訂閱。
@@ -107,7 +120,7 @@ async function readPushRequest(request: Request): Promise<PushRequest> {
   const pane = fields.pane === undefined ? null : fields.pane;
   if (!HEX_64.test(key)) throw invalid("key must be 64 lowercase hex characters.");
   if ([...workspace].length > MAX_WORKSPACE_LENGTH) throw invalid("workspace is too long.");
-  if (!PUSH_STATUSES.has(status)) throw invalid("Unsupported status.");
+  if (!Object.hasOwn(STATUS_ALERTS, status)) throw invalid("Unsupported status.");
   if (pane !== null && (typeof pane !== "string" || !PANE_ID.test(pane))) throw invalid("pane must be a herdr pane id.");
   return { key, workspace, status, pane };
 }
@@ -119,14 +132,14 @@ async function takePairing(env: Env, keyHash: string, now: number): Promise<Pair
        rate_count = CASE WHEN ? - rate_window_started_at >= ? THEN 1 ELSE rate_count + 1 END,
        rate_window_started_at = CASE WHEN ? - rate_window_started_at >= ? THEN ? ELSE rate_window_started_at END
      WHERE key_hash = ?
-     RETURNING member_id, device_token, environment, rate_count`,
+     RETURNING member_id, device_token, environment, rate_count, kinds`,
   )
     .bind(now, PUSH_RATE_WINDOW_MS, now, PUSH_RATE_WINDOW_MS, now, keyHash)
     .first<Pairing>();
 }
 
-/// POST /v1/push:主機外掛送「需要你」。
-export async function sendPush(env: Env, request: Request): Promise<void> {
+/// POST /v1/push:主機外掛送「需要你」或「完成」。回傳是否真的轉給 APNs(種類不在配對偏好內時不轉)。
+export async function sendPush(env: Env, request: Request): Promise<boolean> {
   const push = await readPushRequest(request);
   const keyHash = await pairingKeyHash(push.key);
   const pairing = await takePairing(env, keyHash, Date.now());
@@ -140,9 +153,11 @@ export async function sendPush(env: Env, request: Request): Promise<void> {
   if (!(await hasActiveSubscription(env, pairing.member_id))) {
     throw new ApiError(403, "subscription_required", "This needs an active Purrdr Plus subscription.");
   }
+  // 不是錯誤：主機端不需要知道使用者的偏好。
+  if (!(JSON.parse(pairing.kinds) as string[]).includes(push.status)) return false;
 
   const response = await deliverToApns(env, pairing, apnsPayload(push, keyHash));
-  if (response.ok) return;
+  if (response.ok) return true;
   const reason = await apnsReason(response);
   if (response.status === 410 || DEAD_TOKEN_REASONS.has(reason)) {
     await env.DB.prepare("DELETE FROM push_pairings WHERE key_hash = ?").bind(keyHash).run();
@@ -155,16 +170,24 @@ function pairingRevoked(): ApiError {
   return new ApiError(410, "pairing_revoked", "This device no longer accepts notifications. Turn notifications on again in Purrdr.");
 }
 
-/// APNs payload 由後台組：標題是 workspace 名稱，內文是固定句子(app 的字串表以 `loc-key` 翻譯),
-/// 「需要你」用 Time Sensitive。根層的 `pairing`(配對密鑰雜湊)與 `pane` 給 app 點通知時找主機與 Agent。
+/// 各狀態的固定內文(app 的字串表以 `loc-key` 翻譯)、通知類別與中斷等級。
+/// 「需要你」用 Time Sensitive;「完成」用 active,專注模式下不打斷。
+const STATUS_ALERTS: Record<string, { locKey: string; category: string; interruptionLevel: string }> = {
+  blocked: { locKey: "An agent needs you.", category: "AGENT_BLOCKED", interruptionLevel: "time-sensitive" },
+  done: { locKey: "An agent finished.", category: "AGENT_DONE", interruptionLevel: "active" },
+};
+
+/// APNs payload 由後台組：標題是 workspace 名稱，內文依狀態固定。
+/// 根層的 `pairing`(配對密鑰雜湊)與 `pane` 給 app 點通知時找主機與 Agent。
 export function apnsPayload(push: PushRequest, keyHash: string): Record<string, unknown> {
+  const alert = STATUS_ALERTS[push.status]!;
   return {
     aps: {
-      alert: { title: push.workspace, "loc-key": "An agent needs you." },
+      alert: { title: push.workspace, "loc-key": alert.locKey },
       sound: "default",
-      "interruption-level": "time-sensitive",
-      // app 為這個類別設了隱藏預覽時的通用文字(HIG:hiddenPreviewsBodyPlaceholder)。
-      category: "AGENT_BLOCKED",
+      "interruption-level": alert.interruptionLevel,
+      // app 為各類別設了隱藏預覽時的通用文字(HIG:hiddenPreviewsBodyPlaceholder)。
+      category: alert.category,
     },
     pairing: keyHash,
     ...(push.pane === null ? {} : { pane: push.pane }),
