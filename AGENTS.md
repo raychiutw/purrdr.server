@@ -7,7 +7,7 @@ Purrdr 的後台：Cloudflare Worker + D1,負責會員登入、訂閱權限、�
 這個 repo 沒有自己的 ADR、行為規格與詞彙表，一律引用 app repo:
 - 詞彙 [`GLOSSARY.md`](https://github.com/raychiutw/purrdr.ios/blob/master/GLOSSARY.md)
 - 決策 [`docs/adr/`](https://github.com/raychiutw/purrdr.ios/tree/master/docs/adr)(推播 ADR-0004、會員與訂閱 ADR-0007、改名 ADR-0009)
-- issue 與 spec 都在 app repo 的 GitHub Issues。本 repo 提到 issue 一律寫成 `raychiutw/purrdr.ios#<數字>`(抽出前的舊 commit 寫的 `#<數字>` 也是指 app repo)。
+- 後台的 issue 與 spec 開在本 repo 的 GitHub Issues。引用 app repo 的 issue 一律寫成 `raychiutw/purrdr.ios#<數字>`;抽出前的舊 commit 寫的 `#<數字>` 指 app repo。
 - 主機端(主機服務、主機外掛)在 [`raychiutw/purrdr.host`](https://github.com/raychiutw/purrdr.host)。
 
 ## 技術棧
@@ -31,7 +31,11 @@ CI(`.github/workflows/ci.yml`,PR 與推到 `master`):`npm ci`、`npm run typeche
 
 ## 規範
 
-- 語言與 TDD 依 app repo 的 [`AGENTS.md`](https://github.com/raychiutw/purrdr.ios/blob/master/AGENTS.md):文件、註解、commit message 用繁體中文(台灣用語),技術名詞保留英文。
-- TDD:production code 變更先寫失敗測試，真的跑出紅燈再實作;紀錄放 `.tdd-logs/`(不進 git),摘要寫在 PR。
 - 新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`;API 與 app 的對應改動(例如主機同步欄位)要兩個 repo 一起改。
-- 不直接 commit 到 `master`:開 feature branch,push 後開 PR,CI 全綠後以 merge commit 合併。
+
+## 開發流程
+
+- 走 Matt Pocock skill 工作流:`/grill-with-docs` → `/to-spec` → `/to-tickets` → `/implement`。
+- TDD:production code 變更先寫失敗測試，並真的跑出紅燈、留下輸出;紀錄放 `.tdd-logs/`(不進 git),摘要寫在 PR。
+- 不直接 commit 到 `master`:開 feature branch,push 後開 PR,CI 全綠後以 **merge commit** 合併(不 squash)。
+- 文件、註解、commit message 用繁體中文(台灣用語),技術名詞保留英文。
