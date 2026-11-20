@@ -6,7 +6,7 @@ import { hasActiveSubscription, requireActiveSubscription } from "./subscription
 /// 推播(#29、ADR-0004、ADR-0007)。
 ///
 /// - app(會員)註冊推播配對：送配對密鑰的雜湊、APNs device token、環境與要收的種類;需要有效訂閱。
-/// - 主機外掛在 Agent「需要你」或「完成」時帶密鑰呼叫 `POST /v1/push`:後台算雜湊找到配對、每組密鑰限速、
+/// - 主機外掛在 Agent「需要你」或「完成」、主機服務在 Agent「可能卡住」或「仍在等你」時帶密鑰呼叫 `POST /v1/push`:後台算雜湊找到配對、每組密鑰限速、
 ///   確認會員仍有有效訂閱與種類偏好，再自己組 APNs payload 轉送。外掛只能送 workspace 名稱、狀態與 pane id,
 ///   多帶任何欄位(例如對話內容)一律拒絕，所以對話內容不會經過後台或 APNs。
 /// - 主機服務以同一組密鑰送事件(有新版、已更新、已退回),只能帶事件與版本;同一事件 24 小時只送一次。
@@ -21,8 +21,8 @@ const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane"]);
 const HOST_SERVICE_PUSH_FIELDS = new Set(["key", "event", "version"]);
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const MAX_VERSION_LENGTH = 64;
-/// 配對可以選擇要收的推播種類(`host_service` = 主機服務事件)。
-const PAIRING_KINDS = ["blocked", "done", "host_service"] as const;
+/// 配對可以選擇要收的推播種類(`host_service` = 主機服務事件;`stuck`、`reminder` 見 purrdr.server#15)。
+const PAIRING_KINDS = ["blocked", "done", "stuck", "reminder", "host_service"] as const;
 type PairingKind = (typeof PAIRING_KINDS)[number];
 /// 沒帶 `kinds` 的新配對只收「需要你」,舊版 app 行為不變。
 const DEFAULT_PAIRING_KINDS: readonly PairingKind[] = ["blocked"];
@@ -110,7 +110,7 @@ function readKinds(body: Record<string, unknown>): string | null {
     return null;
   }
   if (!Array.isArray(kinds) || !kinds.every(isPairingKind)) {
-    throw invalid("kinds must be an array of blocked, done or host_service.");
+    throw invalid("kinds must be an array of blocked, done, stuck, reminder or host_service.");
   }
   return JSON.stringify([...new Set(kinds)]);
 }
@@ -122,7 +122,7 @@ export async function revokePairing(env: Env, memberId: string, keyHash: string)
 
 // MARK: - 送推播(主機外掛)
 
-type PushStatus = "blocked" | "done";
+type PushStatus = "blocked" | "done" | "stuck" | "reminder";
 type HostServiceEvent = "host_service_update_available" | "host_service_updated" | "host_service_update_rolled_back";
 type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null };
 type HostServicePush = { kind: "host_service"; key: string; event: HostServiceEvent; version: string | null };
@@ -231,7 +231,7 @@ async function exceedsRateLimit(env: Env, keyHash: string, now: number): Promise
   return (counted?.rate_count ?? 0) > PUSH_RATE_LIMIT;
 }
 
-/// POST /v1/push:主機外掛送「需要你」或「完成」，或主機服務送事件。
+/// POST /v1/push:Agent 狀態(需要你、完成、可能卡住、仍在等你)或主機服務事件。
 /// 回傳是否真的轉給 APNs(種類不在配對偏好內、或事件 24 小時內送過時不轉)。
 export async function sendPush(env: Env, request: Request): Promise<boolean> {
   const push = await readPushRequest(request);
@@ -312,10 +312,12 @@ function pairingRevoked(): ApiError {
 }
 
 /// 各狀態的固定內文(app 的字串表以 `loc-key` 翻譯)、通知類別與中斷等級。
-/// 「需要你」用 Time Sensitive;「完成」用 active,專注模式下不打斷。
+/// 「需要你」「仍在等你」用 Time Sensitive;「完成」「可能卡住」用 active,專注模式下不打斷。
 const STATUS_ALERTS: Record<PushStatus, { locKey: string; category: string; interruptionLevel: string }> = {
   blocked: { locKey: "An agent needs you.", category: "AGENT_BLOCKED", interruptionLevel: "time-sensitive" },
   done: { locKey: "An agent finished.", category: "AGENT_DONE", interruptionLevel: "active" },
+  stuck: { locKey: "An agent may be stuck.", category: "AGENT_STUCK", interruptionLevel: "active" },
+  reminder: { locKey: "An agent is still waiting for you.", category: "AGENT_REMINDER", interruptionLevel: "time-sensitive" },
 };
 
 /// APNs payload 由後台組：標題是 workspace 名稱，內文依狀態固定。

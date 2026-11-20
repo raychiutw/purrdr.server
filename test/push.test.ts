@@ -458,6 +458,160 @@ describe("Agent 完成(done)與種類偏好", () => {
   });
 });
 
+describe("Agent 可能卡住(stuck)與仍在等你(reminder)", () => {
+  const stuck = (key: string) => ({ key, workspace: "weather-app", status: "stuck", pane: "w2:p1" });
+  const reminder = (key: string) => ({ key, workspace: "weather-app", status: "reminder", pane: "w2:p1" });
+
+  it("偏好含 stuck 時轉給 APNs:標題 workspace、「An agent may be stuck.」、AGENT_STUCK、active", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    expect((await register(me.accessToken, key, { kinds: ["blocked", "stuck"] })).status).toBe(201);
+
+    const sent = await push(stuck(key));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+    expect(identityProviders.apnsCalls[0]!.payload).toEqual({
+      aps: {
+        alert: { title: "weather-app", "loc-key": "An agent may be stuck." },
+        sound: "default",
+        "interruption-level": "active",
+        category: "AGENT_STUCK",
+      },
+      pairing: await hashOf(key),
+      pane: "w2:p1",
+      status: "stuck",
+    });
+  });
+
+  it("偏好含 reminder 時轉給 APNs:標題 workspace、「An agent is still waiting for you.」、AGENT_REMINDER、time-sensitive", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    expect((await register(me.accessToken, key, { kinds: ["blocked", "reminder"] })).status).toBe(201);
+
+    const sent = await push(reminder(key));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+    expect(identityProviders.apnsCalls[0]!.payload).toEqual({
+      aps: {
+        alert: { title: "weather-app", "loc-key": "An agent is still waiting for you." },
+        sound: "default",
+        "interruption-level": "time-sensitive",
+        category: "AGENT_REMINDER",
+      },
+      pairing: await hashOf(key),
+      pane: "w2:p1",
+      status: "reminder",
+    });
+  });
+
+  it("註冊時沒帶 kinds 不含新種類:stuck、reminder 都回 200 delivered false,不呼叫 APNs", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    expect((await register(me.accessToken, key)).status).toBe(201);
+
+    expect(await push(stuck(key))).toMatchObject({ status: 200, body: { delivered: false } });
+    expect(await push(reminder(key))).toMatchObject({ status: 200, body: { delivered: false } });
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("兩種分別開關：只開 stuck 收不到 reminder,只開 reminder 收不到 stuck", async () => {
+    const me = await subscribedMember();
+    const onlyStuck = pairingKey();
+    const onlyReminder = pairingKey();
+    await register(me.accessToken, onlyStuck, { kinds: ["stuck"] });
+    await register(me.accessToken, onlyReminder, { kinds: ["reminder"] });
+
+    expect((await push(reminder(onlyStuck))).body).toEqual({ delivered: false });
+    expect((await push(stuck(onlyReminder))).body).toEqual({ delivered: false });
+    expect((await push(stuck(onlyStuck))).body).toEqual({ delivered: true });
+    expect((await push(reminder(onlyReminder))).body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(2);
+  });
+
+  it("速率限制對 stuck 與 reminder 一樣生效(同一組密鑰共用額度)", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["stuck", "reminder"] });
+
+    for (let index = 0; index < 5; index += 1) {
+      expect((await push(stuck(key))).status).toBe(200);
+      expect((await push(reminder(key))).status).toBe(200);
+    }
+    const limited = await push(reminder(key));
+
+    expect(limited.status).toBe(429);
+    expect(limited.body.error.code).toBe("rate_limited");
+  });
+
+  it("訂閱到期後 stuck、reminder 一樣不轉送(403 subscription_required)", async () => {
+    const me = await member();
+    const purchaseDate = Date.now() - 40 * DAY;
+    await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
+    const key = pairingKey();
+    await env.DB.prepare(
+      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, kinds, created_at, updated_at)
+       VALUES (?, ?, 'apns', ?, 'production', '["stuck","reminder"]', 0, 0)`,
+    )
+      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
+      .run();
+
+    for (const body of [stuck(key), reminder(key)]) {
+      const sent = await push(body);
+      expect(sent.status).toBe(403);
+      expect(sent.body.error.code).toBe("subscription_required");
+    }
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it.each([
+    ["stuck", stuck],
+    ["reminder", reminder],
+  ])("遠端關閉的配對送 %s 回 410 pairing_revoked,只回一次", async (_, body) => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await env.DB.prepare("INSERT INTO revoked_push_pairings (key_hash, member_id, revoked_at) VALUES (?, ?, ?)").bind(await hashOf(key), me.id, Date.now()).run();
+
+    const first = await push(body(key));
+    const second = await push(body(key));
+
+    expect(first.status).toBe(410);
+    expect(first.body.error.code).toBe("pairing_revoked");
+    expect(second.status).toBe(404);
+  });
+
+  it.each([
+    ["stuck", stuck],
+    ["reminder", reminder],
+  ])("APNs 回 Unregistered 時 %s 一樣回 410 pairing_revoked 並刪掉配對", async (kind, body) => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: [kind] });
+    identityProviders.apnsReplies = [{ status: 410, reason: "Unregistered" }];
+
+    const sent = await push(body(key));
+
+    expect(sent.status).toBe(410);
+    expect(sent.body.error.code).toBe("pairing_revoked");
+    expect(await pairingRows()).toHaveLength(0);
+  });
+
+  it("新種類多帶欄位仍回 400,不轉給 APNs", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["stuck"] });
+
+    const sent = await push({ ...stuck(key), message: "secret conversation" });
+
+    expect(sent.status).toBe(400);
+    expect(sent.body.error.code).toBe("invalid_request");
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+});
+
 const hostEvent = (key: string, event: string, version?: string) => ({ key, event, ...(version === undefined ? {} : { version }) });
 
 async function hostServicePairing(kinds: string[] = ["blocked", "host_service"]) {

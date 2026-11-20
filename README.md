@@ -35,12 +35,12 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `GET /v1/members/me/subscription` | 存取權杖 | 回 `{ subscription }`;從沒訂閱過是 `null` |
 | `POST /v1/members/me/subscription/app-store` | 存取權杖 | 提交 StoreKit 2 交易。body `{ signedTransaction }`(`VerificationResult.jwsRepresentation`)。回 `{ subscription }` |
 | `POST /v1/members/me/hosts/sync` | 存取權杖 | 主機同步(要有效的 Purrdr Plus)。body `{ changes: [...] }`,回 `{ hosts: [...], deletedHostIds: [...] }`,見下方「主機同步」 |
-| `POST /v1/members/me/push-pairings` | 存取權杖 | 註冊推播配對(需要有效訂閱)。body `{ keyHash, platform: "apns", deviceToken, environment: "production"\|"sandbox", deviceId?, deviceName?, model?, kinds? }`;`kinds` 是要收的推播種類(`blocked`、`done`、`host_service` 的陣列),新配對沒帶時只收 `blocked`。同一個 `keyHash` 再送一次是更新(APNs token 輪替、改偏好;沒帶 `kinds` 保留原本的偏好)。裝置欄位見下方「通知裝置」。回 201 |
+| `POST /v1/members/me/push-pairings` | 存取權杖 | 註冊推播配對(需要有效訂閱)。body `{ keyHash, platform: "apns", deviceToken, environment: "production"\|"sandbox", deviceId?, deviceName?, model?, kinds? }`;`kinds` 是要收的推播種類(`blocked`、`done`、`stuck`、`reminder`、`host_service` 的陣列),新配對沒帶時只收 `blocked`。同一個 `keyHash` 再送一次是更新(APNs token 輪替、改偏好;沒帶 `kinds` 保留原本的偏好)。裝置欄位見下方「通知裝置」。回 201 |
 | `DELETE /v1/members/me/push-pairings/{keyHash}` | 存取權杖 | 撤銷推播配對(只刪自己的、不存在也算成功、不需要訂閱)。回 204 |
 | `GET /v1/members/me/push-devices?currentDeviceId=` | 存取權杖 | 會收到通知的裝置(不需要訂閱：到期後仍要能看到並關閉遺失的裝置)。回 `{ devices: [{ deviceId, name, model, hostCount, lastRegisteredAt, current }] }`,見下方「通知裝置」 |
 | `PATCH /v1/members/me/push-devices/{deviceId}?currentDeviceId=` | 存取權杖 | 裝置改名(需要有效訂閱)。body `{ name }`,回 `{ device }`;不是自己的或沒有配對回 404 `device_not_found` |
 | `DELETE /v1/members/me/push-devices/{deviceId}` | 存取權杖 | 遠端關閉裝置：撤銷它在所有主機的配對(不需要訂閱)。回 204;不是自己的或沒有配對回 404 `device_not_found` |
-| `POST /v1/push` | 配對密鑰 | 主機外掛送「需要你」或「完成」:body 只能有 `{ key, workspace, status: "blocked"\|"done", pane? }`。主機服務送事件:body 只能有 `{ key, event: "host_service_update_available"\|"host_service_updated"\|"host_service_update_rolled_back", version? }`(`host_service_updated` 必須帶 `version`)。兩種形狀互斥;多一個欄位、不認得的 `status`／`event`、`version` 不是語意化版本就 400。回 200 `{ delivered: true }`;種類不在配對的 `kinds` 內，或同一事件與版本 24 小時內送過時不轉 APNs,回 200 `{ delivered: false }` |
+| `POST /v1/push` | 配對密鑰 | 主機外掛送「需要你」或「完成」、主機服務送「可能卡住」或「仍在等你」:body 只能有 `{ key, workspace, status: "blocked"\|"done"\|"stuck"\|"reminder", pane? }`。主機服務送事件:body 只能有 `{ key, event: "host_service_update_available"\|"host_service_updated"\|"host_service_update_rolled_back", version? }`(`host_service_updated` 必須帶 `version`)。兩種形狀互斥;多一個欄位、不認得的 `status`／`event`、`version` 不是語意化版本就 400。回 200 `{ delivered: true }`;種類不在配對的 `kinds` 內，或同一事件與版本 24 小時內送過時不轉 APNs,回 200 `{ delivered: false }` |
 | `POST /v1/app-store/notifications` | — | App Store Server Notifications v2 的 webhook。body `{ signedPayload }`,處理完回 200 `{ received: true }` |
 
 `member` 的形狀:`{ id, identities: [{ provider, email, linkedAt }] }`(email 可能是 Apple private relay,也可能是 `null`)。
@@ -105,12 +105,16 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 - **推播**(ADR-0004、#29):app 產生 32 bytes 配對密鑰(64 位小寫 hex),只把那 32 bytes 的 SHA-256(小寫 hex)交給後台;密鑰本身只在 app 與主機的 `~/.purrdr/push-<裝置>/pairing`。主機外掛送推播時帶密鑰，後台算雜湊找配對 → 會員要有有效訂閱 → 種類要在配對的 `kinds` 偏好內(否則回 `{ delivered: false }`,不呼叫 APNs)→ 主機服務事件去重 → 每組密鑰每分鐘 10 則(只計真的要送 APNs 的，偏好或去重擋下的不計，避免擠掉「需要你」;速率限制、訂閱檢查與 410 對所有種類一致)→ 由後台自己組 APNs payload(標題 = workspace 名稱、根層 `pairing`(雜湊)、`pane`、`status`;`category` 讓 app 設定隱藏預覽時的通用文字):
   - `blocked`(需要你):`loc-key` 「An agent needs you.」、`interruption-level: time-sensitive`、`category: AGENT_BLOCKED`。
   - `done`(完成):`loc-key` 「An agent finished.」、`interruption-level: active`、`category: AGENT_DONE`。
+  - `stuck`(可能卡住,purrdr.server#15):`loc-key` 「An agent may be stuck.」、`interruption-level: active`、`category: AGENT_STUCK`。
+  - `reminder`(仍在等你,purrdr.server#15):`loc-key` 「An agent is still waiting for you.」、`interruption-level: time-sensitive`、`category: AGENT_REMINDER`。
+
+    `stuck`、`reminder` 由主機服務偵測(raychiutw/purrdr.host#25),每個狀態期間只送一次;後台不另做去重，由速率限制保護。
   - 主機服務事件(purrdr.server#11,偏好 `host_service`):主機服務以同一份配對檔的密鑰送 `{ key, event, version? }`。標題 `title-loc-key` 「Host service」(不帶 workspace 或主機名稱)、`interruption-level: passive`、`category: HOST_SERVICE_EVENT`,根層 `pairing`、`event` 與 `version`(有帶才有),沒有 `pane`／`status`。內文 `loc-key`:
     - `host_service_update_available`:「A host service update is available.」
     - `host_service_updated`:「Host service updated to %@.」,`loc-args: [version]`(這個事件必須帶 `version`)
     - `host_service_update_rolled_back`:「Host service update failed and was rolled back.」
 
-    `version` 是語意化版本(`1.2.3`,可帶 `-prerelease`、`+build`,不帶 `v`),最長 64 字。同一組密鑰、同一個 `event` 與 `version` 24 小時內只送一次(`host_service_push_events`,APNs 收下後才算送過;重複的回 200 `{ delivered: false }`);`done` 不去重，由速率限制保護。
+    `version` 是語意化版本(`1.2.3`,可帶 `-prerelease`、`+build`,不帶 `v`),最長 64 字。同一組密鑰、同一個 `event` 與 `version` 24 小時內只送一次(`host_service_push_events`,APNs 收下後才算送過;重複的回 200 `{ delivered: false }`);`done`、`stuck`、`reminder` 不去重，由速率限制保護。
 
   外掛與主機服務不能決定推播內容，只能送 workspace 名稱、狀態、pane id、事件種類與版本號，所以對話內容不經過後台與 APNs。APNs provider token(ES256)每 50 分鐘重簽一次。推播配對不算「擋合併的資料」;刪除會員時一併刪除。
 - **通知裝置**(purrdr.server#5):一組配對 = 一支裝置 × 一台主機;註冊配對時帶 `deviceId`(app 產生、存在 Keychain 的 UUID,大小寫不拘、後台存小寫)、`deviceName`(去頭尾空白後 1～64 字，不能含控制字元、格式字元(零寬、bidi 覆寫)與行／段落分隔;改名同規則)、`model`(`iPhone`／`iPad`),同一個 `deviceId` 的配對歸成一台裝置。名稱已存在時註冊不覆蓋(使用者改的名稱以 PATCH 為準)。
