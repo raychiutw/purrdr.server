@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { DAY, submitTransaction } from "./app-store";
 import { api, identityProviders, signInWithApple } from "./fakes";
 
@@ -207,7 +207,7 @@ describe("主機外掛送推播", () => {
   });
 
   it.each([
-    ["狀態不是 blocked", { status: "done" }],
+    ["狀態不認得", { status: "running" }],
     ["workspace 名稱是空的", { workspace: "" }],
     ["workspace 名稱太長", { workspace: "w".repeat(101) }],
     ["pane id 形狀不對", { pane: "w1:p1; echo" }],
@@ -301,5 +301,405 @@ describe("主機外掛送推播", () => {
     expect(sent.status).toBe(502);
     expect(sent.body.error.code).toBe("apns_failed");
     expect(await pairingRows()).toHaveLength(1);
+  });
+});
+
+describe("Agent 完成(done)與種類偏好", () => {
+  const done = (key: string) => ({ key, workspace: "weather-app", status: "done", pane: "w2:p1" });
+
+  it("偏好含 done 時轉給 APNs:標題 workspace、「An agent finished.」、AGENT_DONE、active", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["blocked", "done"] });
+
+    const sent = await push(done(key));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+    expect(identityProviders.apnsCalls[0]!.payload).toEqual({
+      aps: {
+        alert: { title: "weather-app", "loc-key": "An agent finished." },
+        sound: "default",
+        "interruption-level": "active",
+        category: "AGENT_DONE",
+      },
+      pairing: await hashOf(key),
+      pane: "w2:p1",
+      status: "done",
+    });
+  });
+
+  it("註冊時沒帶 kinds(舊版 app)只收 blocked:done 回 200 delivered false,不呼叫 APNs", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    expect((await register(me.accessToken, key)).status).toBe(201);
+
+    const sent = await push(done(key));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: false });
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+    expect((await push(blocked(key))).body).toEqual({ delivered: true });
+  });
+
+  it("同一組密鑰再註冊帶 kinds 即更新偏好，不會多一筆", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key);
+
+    expect((await register(me.accessToken, key, { kinds: ["blocked", "done", "host_service"] })).status).toBe(201);
+    expect((await push(done(key))).body).toEqual({ delivered: true });
+
+    expect((await register(me.accessToken, key, { kinds: ["blocked"] })).status).toBe(201);
+    expect((await push(done(key))).body).toEqual({ delivered: false });
+    expect(await pairingRows()).toHaveLength(1);
+  });
+
+  it("再註冊沒帶 kinds(APNs token 輪替)保留原本的偏好", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["done"] });
+
+    await register(me.accessToken, key, { deviceToken: "b2".repeat(32) });
+
+    expect((await push(done(key))).body).toEqual({ delivered: true });
+    expect((await push(blocked(key))).body).toEqual({ delivered: false });
+  });
+
+  it("速率限制對 done 一樣生效", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["blocked", "done"] });
+
+    for (let index = 0; index < 10; index += 1) expect((await push(done(key))).status).toBe(200);
+    const limited = await push(done(key));
+
+    expect(limited.status).toBe(429);
+    expect(limited.body.error.code).toBe("rate_limited");
+  });
+
+  it("訂閱到期後 done 一樣不轉送(403 subscription_required)", async () => {
+    const me = await member();
+    const purchaseDate = Date.now() - 40 * DAY;
+    await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
+    const key = pairingKey();
+    await env.DB.prepare(
+      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, kinds, created_at, updated_at)
+       VALUES (?, ?, 'apns', ?, 'production', '["blocked","done"]', 0, 0)`,
+    )
+      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
+      .run();
+
+    const sent = await push(done(key));
+
+    expect(sent.status).toBe(403);
+    expect(sent.body.error.code).toBe("subscription_required");
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("APNs 回 Unregistered 時 done 一樣回 410 pairing_revoked 並刪掉配對", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["done"] });
+    identityProviders.apnsReplies = [{ status: 410, reason: "Unregistered" }];
+
+    const sent = await push(done(key));
+
+    expect(sent.status).toBe(410);
+    expect(sent.body.error.code).toBe("pairing_revoked");
+    expect(await pairingRows()).toHaveLength(0);
+  });
+
+  it("遠端關閉的配對送 done 回 410 pairing_revoked,只回一次", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await env.DB.prepare("INSERT INTO revoked_push_pairings (key_hash, member_id, revoked_at) VALUES (?, ?, ?)").bind(await hashOf(key), me.id, Date.now()).run();
+
+    const first = await push(done(key));
+    const second = await push(done(key));
+
+    expect(first.status).toBe(410);
+    expect(first.body.error.code).toBe("pairing_revoked");
+    expect(second.status).toBe(404);
+  });
+
+  it.each([
+    ["kinds 不是陣列", { kinds: "done" }],
+    ["kinds 有不認得的種類", { kinds: ["blocked", "chat"] }],
+    ["kinds 的值不是字串", { kinds: [1] }],
+  ])("%s時註冊回 400 invalid_request,什麼都不存", async (_, extra) => {
+    const me = await subscribedMember();
+
+    const registered = await register(me.accessToken, pairingKey(), extra);
+
+    expect(registered.status).toBe(400);
+    expect(registered.body.error.code).toBe("invalid_request");
+    expect(await pairingRows()).toHaveLength(0);
+  });
+});
+
+const hostEvent = (key: string, event: string, version?: string) => ({ key, event, ...(version === undefined ? {} : { version }) });
+
+async function hostServicePairing(kinds: string[] = ["blocked", "host_service"]) {
+  const me = await subscribedMember();
+  const key = pairingKey();
+  expect((await register(me.accessToken, key, { kinds })).status).toBe(201);
+  return { me, key };
+}
+
+describe("主機服務事件(有新版、已更新、已退回)", () => {
+  it("已更新：轉給 APNs,標題「Host service」、內文帶版本、HOST_SERVICE_EVENT、passive 不帶 sound,根層 event 與 version", async () => {
+    const { key } = await hostServicePairing();
+
+    const sent = await push(hostEvent(key, "host_service_updated", "0.7.0"));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+    expect(identityProviders.apnsCalls[0]!.payload).toEqual({
+      aps: {
+        alert: { "title-loc-key": "Host service", "loc-key": "Host service updated to %@.", "loc-args": ["0.7.0"] },
+        "interruption-level": "passive",
+        category: "HOST_SERVICE_EVENT",
+      },
+      pairing: await hashOf(key),
+      event: "host_service_updated",
+      version: "0.7.0",
+    });
+  });
+
+  it.each([
+    ["host_service_update_available", "A host service update is available."],
+    ["host_service_update_rolled_back", "Host service update failed and was rolled back."],
+  ])("%s 沒帶版本：內文「%s」,根層沒有 version", async (event, locKey) => {
+    const { key } = await hostServicePairing();
+
+    expect((await push(hostEvent(key, event))).body).toEqual({ delivered: true });
+
+    expect(identityProviders.apnsCalls[0]!.payload).toEqual({
+      aps: {
+        alert: { "title-loc-key": "Host service", "loc-key": locKey },
+        "interruption-level": "passive",
+        category: "HOST_SERVICE_EVENT",
+      },
+      pairing: await hashOf(key),
+      event,
+    });
+  });
+
+  it("有新版帶版本時，根層帶 version,內文不變", async () => {
+    const { key } = await hostServicePairing();
+
+    await push(hostEvent(key, "host_service_update_available", "0.8.0"));
+
+    const payload = identityProviders.apnsCalls[0]!.payload;
+    expect(payload.aps.alert).toEqual({ "title-loc-key": "Host service", "loc-key": "A host service update is available." });
+    expect(payload.version).toBe("0.8.0");
+  });
+
+  it.each([
+    ["同時帶 status 與 event", (key: string) => ({ ...blocked(key), event: "host_service_updated", version: "0.7.0" })],
+    ["同時帶 workspace 與 event", (key: string) => ({ key, workspace: "weather-app", event: "host_service_update_available" })],
+    ["事件帶 pane", (key: string) => ({ key, event: "host_service_update_available", pane: "w2:p1" })],
+    ["事件多帶其他欄位", (key: string) => ({ key, event: "host_service_update_available", message: "secret" })],
+    ["事件不認得", (key: string) => ({ key, event: "host_service_exploded" })],
+    ["event 不是字串", (key: string) => ({ key, event: 1 })],
+    ["已更新沒帶版本", (key: string) => ({ key, event: "host_service_updated" })],
+    ["版本不是語意化版本", (key: string) => ({ key, event: "host_service_updated", version: "latest" })],
+    ["版本前面有 v", (key: string) => ({ key, event: "host_service_updated", version: "v0.7.0" })],
+    ["版本不是字串", (key: string) => ({ key, event: "host_service_updated", version: 7 })],
+    ["版本太長", (key: string) => ({ key, event: "host_service_updated", version: `1.0.0-${"a".repeat(60)}` })],
+    ["密鑰不是 64 位 hex", () => ({ key: "short", event: "host_service_update_available" })],
+  ])("%s時回 400 invalid_request,不轉給 APNs", async (_, body) => {
+    const { key } = await hostServicePairing();
+
+    const sent = await push(body(key));
+
+    expect(sent.status).toBe(400);
+    expect(sent.body.error.code).toBe("invalid_request");
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("版本可以帶 prerelease 與 build metadata", async () => {
+    const { key } = await hostServicePairing();
+
+    const sent = await push(hostEvent(key, "host_service_updated", "1.2.3-beta.1+build.5"));
+
+    expect(sent.body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls[0]!.payload.version).toBe("1.2.3-beta.1+build.5");
+  });
+
+  it.each([
+    ["註冊時沒帶 kinds(舊版 app)", undefined],
+    ["偏好不含 host_service", ["blocked", "done"]],
+  ])("%s:回 200 delivered false,不呼叫 APNs", async (_, kinds) => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, kinds === undefined ? {} : { kinds });
+
+    const sent = await push(hostEvent(key, "host_service_updated", "0.7.0"));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: false });
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("只收 host_service 的配對收不到 blocked", async () => {
+    const { key } = await hostServicePairing(["host_service"]);
+
+    expect((await push(blocked(key))).body).toEqual({ delivered: false });
+    expect((await push(hostEvent(key, "host_service_update_available"))).body).toEqual({ delivered: true });
+  });
+
+  it("速率限制對主機服務事件一樣生效", async () => {
+    const { key } = await hostServicePairing();
+
+    for (let index = 0; index < 10; index += 1) {
+      expect((await push(hostEvent(key, "host_service_updated", `0.7.${index}`))).status).toBe(200);
+    }
+    const limited = await push(hostEvent(key, "host_service_updated", "0.7.99"));
+
+    expect(limited.status).toBe(429);
+    expect(limited.body.error.code).toBe("rate_limited");
+  });
+
+  it("訂閱到期後主機服務事件一樣不轉送(403 subscription_required)", async () => {
+    const me = await member();
+    const purchaseDate = Date.now() - 40 * DAY;
+    await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
+    const key = pairingKey();
+    await env.DB.prepare(
+      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, kinds, created_at, updated_at)
+       VALUES (?, ?, 'apns', ?, 'production', '["host_service"]', 0, 0)`,
+    )
+      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
+      .run();
+
+    const sent = await push(hostEvent(key, "host_service_update_available"));
+
+    expect(sent.status).toBe(403);
+    expect(sent.body.error.code).toBe("subscription_required");
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("遠端關閉的配對送主機服務事件回 410 pairing_revoked,只回一次", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await env.DB.prepare("INSERT INTO revoked_push_pairings (key_hash, member_id, revoked_at) VALUES (?, ?, ?)").bind(await hashOf(key), me.id, Date.now()).run();
+
+    const first = await push(hostEvent(key, "host_service_update_available"));
+    const second = await push(hostEvent(key, "host_service_update_available"));
+
+    expect(first.status).toBe(410);
+    expect(first.body.error.code).toBe("pairing_revoked");
+    expect(second.status).toBe(404);
+  });
+
+  it("APNs 回 Unregistered 時主機服務事件一樣回 410 並刪掉配對", async () => {
+    const { key } = await hostServicePairing();
+    identityProviders.apnsReplies = [{ status: 410, reason: "Unregistered" }];
+
+    const sent = await push(hostEvent(key, "host_service_update_available"));
+
+    expect(sent.status).toBe(410);
+    expect(sent.body.error.code).toBe("pairing_revoked");
+    expect(await pairingRows()).toHaveLength(0);
+  });
+});
+
+describe("主機服務事件去重(同一組密鑰＋event＋version 24 小時一次)", () => {
+  const HOUR = 60 * 60_000;
+
+  let clock: MockInstance<typeof Date.now> | undefined;
+
+  afterEach(() => {
+    clock?.mockRestore();
+    clock = undefined;
+  });
+
+  it("同一個事件與版本再送一次：回 200 delivered false,APNs 只收到一則", async () => {
+    const { key } = await hostServicePairing();
+
+    expect((await push(hostEvent(key, "host_service_updated", "0.7.0"))).body).toEqual({ delivered: true });
+    const again = await push(hostEvent(key, "host_service_updated", "0.7.0"));
+
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual({ delivered: false });
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+  });
+
+  it("沒帶版本的同一個事件也只送一次", async () => {
+    const { key } = await hostServicePairing();
+
+    await push(hostEvent(key, "host_service_update_rolled_back"));
+    expect((await push(hostEvent(key, "host_service_update_rolled_back"))).body).toEqual({ delivered: false });
+
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+  });
+
+  it("版本不同、事件不同或密鑰不同都各自送出", async () => {
+    const { me, key } = await hostServicePairing();
+    const otherKey = pairingKey();
+    await register(me.accessToken, otherKey, { kinds: ["host_service"] });
+
+    await push(hostEvent(key, "host_service_update_available", "0.7.0"));
+    expect((await push(hostEvent(key, "host_service_update_available", "0.8.0"))).body).toEqual({ delivered: true });
+    expect((await push(hostEvent(key, "host_service_update_available"))).body).toEqual({ delivered: true });
+    expect((await push(hostEvent(key, "host_service_updated", "0.7.0"))).body).toEqual({ delivered: true });
+    expect((await push(hostEvent(otherKey, "host_service_update_available", "0.7.0"))).body).toEqual({ delivered: true });
+
+    expect(identityProviders.apnsCalls).toHaveLength(5);
+  });
+
+  it("超過 24 小時後同一個事件可以再送", async () => {
+    const { key } = await hostServicePairing();
+    const start = Date.now();
+    clock = vi.spyOn(Date, "now").mockReturnValue(start);
+    await push(hostEvent(key, "host_service_update_available", "0.8.0"));
+
+    clock.mockReturnValue(start + 23 * HOUR);
+    expect((await push(hostEvent(key, "host_service_update_available", "0.8.0"))).body).toEqual({ delivered: false });
+
+    clock.mockReturnValue(start + 24 * HOUR + 1);
+    expect((await push(hostEvent(key, "host_service_update_available", "0.8.0"))).body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(2);
+  });
+
+  it("APNs 失敗(502)不算送過，主機服務重送會再轉給 APNs", async () => {
+    const { key } = await hostServicePairing();
+    identityProviders.apnsReplies = [{ status: 500, reason: "InternalServerError" }];
+
+    expect((await push(hostEvent(key, "host_service_updated", "0.7.0"))).status).toBe(502);
+    const retried = await push(hostEvent(key, "host_service_updated", "0.7.0"));
+
+    expect(retried.body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(2);
+  });
+
+  it("偏好不含 host_service 時沒送出，之後開啟偏好再送會轉給 APNs", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key);
+
+    expect((await push(hostEvent(key, "host_service_updated", "0.7.0"))).body).toEqual({ delivered: false });
+    await register(me.accessToken, key, { kinds: ["host_service"] });
+
+    expect((await push(hostEvent(key, "host_service_updated", "0.7.0"))).body).toEqual({ delivered: true });
+  });
+
+  it("done 不去重：同一個 workspace 連送兩次都轉給 APNs", async () => {
+    const { key } = await hostServicePairing(["done", "host_service"]);
+    const done = { key, workspace: "weather-app", status: "done", pane: "w2:p1" };
+
+    expect((await push(done)).body).toEqual({ delivered: true });
+    expect((await push(done)).body).toEqual({ delivered: true });
+  });
+
+  it("有去重紀錄的會員也能刪除", async () => {
+    const { me, key } = await hostServicePairing();
+    await push(hostEvent(key, "host_service_updated", "0.7.0"));
+
+    expect((await api("DELETE", "/v1/members/me", { accessToken: me.accessToken })).status).toBe(204);
   });
 });
