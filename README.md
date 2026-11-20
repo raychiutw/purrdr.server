@@ -40,7 +40,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `GET /v1/members/me/push-devices?currentDeviceId=` | 存取權杖 | 會收到通知的裝置(不需要訂閱：到期後仍要能看到並關閉遺失的裝置)。回 `{ devices: [{ deviceId, name, model, hostCount, lastRegisteredAt, current }] }`,見下方「通知裝置」 |
 | `PATCH /v1/members/me/push-devices/{deviceId}?currentDeviceId=` | 存取權杖 | 裝置改名(需要有效訂閱)。body `{ name }`,回 `{ device }`;不是自己的或沒有配對回 404 `device_not_found` |
 | `DELETE /v1/members/me/push-devices/{deviceId}` | 存取權杖 | 遠端關閉裝置：撤銷它在所有主機的配對(不需要訂閱)。回 204;不是自己的或沒有配對回 404 `device_not_found` |
-| `POST /v1/push` | 配對密鑰 | 主機外掛送「需要你」或「完成」。body 只能有 `{ key, workspace, status: "blocked"\|"done", pane? }`,多一個欄位或不認得的 `status` 就 400。回 200 `{ delivered: true }`;種類不在配對的 `kinds` 內時不轉 APNs,回 200 `{ delivered: false }` |
+| `POST /v1/push` | 配對密鑰 | 主機外掛送「需要你」或「完成」:body 只能有 `{ key, workspace, status: "blocked"\|"done", pane? }`。主機服務送事件:body 只能有 `{ key, event: "host_service_update_available"\|"host_service_updated"\|"host_service_update_rolled_back", version? }`(`host_service_updated` 必須帶 `version`)。兩種形狀互斥;多一個欄位、不認得的 `status`／`event`、`version` 不是語意化版本就 400。回 200 `{ delivered: true }`;種類不在配對的 `kinds` 內，或同一事件與版本 24 小時內送過時不轉 APNs,回 200 `{ delivered: false }` |
 | `POST /v1/app-store/notifications` | — | App Store Server Notifications v2 的 webhook。body `{ signedPayload }`,處理完回 200 `{ received: true }` |
 
 `member` 的形狀:`{ id, identities: [{ provider, email, linkedAt }] }`(email 可能是 Apple private relay,也可能是 `null`)。
@@ -105,8 +105,14 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 - **推播**(ADR-0004、#29):app 產生 32 bytes 配對密鑰(64 位小寫 hex),只把那 32 bytes 的 SHA-256(小寫 hex)交給後台;密鑰本身只在 app 與主機的 `~/.purrdr/push-<裝置>/pairing`。主機外掛送推播時帶密鑰，後台算雜湊找配對 → 每組密鑰每分鐘 10 則 → 會員要有有效訂閱 → 種類要在配對的 `kinds` 偏好內(否則回 `{ delivered: false }`,不呼叫 APNs;速率限制、訂閱檢查與 410 對所有種類一致)→ 由後台自己組 APNs payload(標題 = workspace 名稱、根層 `pairing`(雜湊)、`pane`、`status`;`category` 讓 app 設定隱藏預覽時的通用文字):
   - `blocked`(需要你):`loc-key` 「An agent needs you.」、`interruption-level: time-sensitive`、`category: AGENT_BLOCKED`。
   - `done`(完成):`loc-key` 「An agent finished.」、`interruption-level: active`、`category: AGENT_DONE`。
+  - 主機服務事件(purrdr.server#11,偏好 `host_service`):主機服務以同一份配對檔的密鑰送 `{ key, event, version? }`。標題 `title-loc-key` 「Host service」(不帶 workspace 或主機名稱)、`interruption-level: passive`、`category: HOST_SERVICE_EVENT`,根層 `pairing`、`event` 與 `version`(有帶才有),沒有 `pane`／`status`。內文 `loc-key`:
+    - `host_service_update_available`:「A host service update is available.」
+    - `host_service_updated`:「Host service updated to %@.」,`loc-args: [version]`(這個事件必須帶 `version`)
+    - `host_service_update_rolled_back`:「Host service update failed and was rolled back.」
 
-  外掛不能決定推播內容，只能送 workspace 名稱、狀態與 pane id,所以對話內容不經過後台與 APNs。APNs provider token(ES256)每 50 分鐘重簽一次。推播配對不算「擋合併的資料」;刪除會員時一併刪除。
+    `version` 是語意化版本(`1.2.3`,可帶 `-prerelease`、`+build`,不帶 `v`),最長 64 字。同一組密鑰、同一個 `event` 與 `version` 24 小時內只送一次(`host_service_push_events`,APNs 收下後才算送過;重複的回 200 `{ delivered: false }`);`done` 不去重，由速率限制保護。
+
+  外掛與主機服務不能決定推播內容，只能送 workspace 名稱、狀態、pane id、事件種類與版本號，所以對話內容不經過後台與 APNs。APNs provider token(ES256)每 50 分鐘重簽一次。推播配對不算「擋合併的資料」;刪除會員時一併刪除。
 - **通知裝置**(purrdr.server#5):一組配對 = 一支裝置 × 一台主機;註冊配對時帶 `deviceId`(app 產生、存在 Keychain 的 UUID,大小寫不拘、後台存小寫)、`deviceName`(去頭尾空白後 1～64 字，不能含控制字元、格式字元(零寬、bidi 覆寫)與行／段落分隔;改名同規則)、`model`(`iPhone`／`iPad`),同一個 `deviceId` 的配對歸成一台裝置。名稱已存在時註冊不覆蓋(使用者改的名稱以 PATCH 為準)。
   - 清單：`hostCount` = 配對數(開了幾台主機)、`lastRegisteredAt` = 最後註冊或更新配對的時間(epoch 毫秒)、`current` = 是否等於 `currentDeviceId`;不回 device token、配對密鑰與雜湊。只列至少有一組配對的裝置，最新的在前。
   - 舊版 app 沒帶 `deviceId` 的配對以 device token 歸類，`deviceId` 是 `legacy-` 加 token 的 SHA-256 前 32 位 hex,`name`／`model` 為 `null`(app 顯示「未命名裝置」);可用這個 id 撤銷或改名;改名後這個 id 會記到配對上，同一支裝置之後再用舊版 app 新增的配對仍歸成同一台。
@@ -125,7 +131,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 
 ## 資料表
 
-見 `migrations/`。`members`、`identities`、`refresh_tokens` 是 #27 的;`entitlements`(訂閱權限)是 #28 的;`push_pairings`(推播配對，含每組密鑰的速率限制計數)是 #29 的，`device_id`、`push_devices`(裝置名稱與型號)、`revoked_push_pairings`(遠端關閉的配對)是 purrdr.server#5 的，`push_pairings.kinds`(推播種類偏好)是 purrdr.server#10 的;`synced_hosts`(主機同步)是 #30 的。之後新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`。
+見 `migrations/`。`members`、`identities`、`refresh_tokens` 是 #27 的;`entitlements`(訂閱權限)是 #28 的;`push_pairings`(推播配對，含每組密鑰的速率限制計數)是 #29 的，`device_id`、`push_devices`(裝置名稱與型號)、`revoked_push_pairings`(遠端關閉的配對)是 purrdr.server#5 的，`push_pairings.kinds`(推播種類偏好)是 purrdr.server#10 的，`host_service_push_events`(主機服務事件的 24 小時去重)是 purrdr.server#11 的;`synced_hosts`(主機同步)是 #30 的。之後新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`。
 
 ## 上線前要填的東西
 
