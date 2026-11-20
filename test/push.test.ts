@@ -612,7 +612,7 @@ describe("Agent 可能卡住(stuck)與仍在等你(reminder)", () => {
   });
 });
 
-const hostEvent = (key: string, event: string, version?: string) =>({ key, event, ...(version === undefined ? {} : { version }) });
+const hostEvent = (key: string, event: string, version?: string) => ({ key, event, ...(version === undefined ? {} : { version }) });
 
 async function hostServicePairing(kinds: string[] = ["blocked", "host_service"]) {
   const me = await subscribedMember();
