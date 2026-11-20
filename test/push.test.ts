@@ -253,7 +253,9 @@ describe("主機外掛送推播", () => {
     const key = pairingKey();
     await register(me.accessToken, key);
 
-    for (let index = 0; index < 10; index += 1) expect((await push(blocked(key))).status).toBe(200);
+    for (let index = 0; index < 10; index += 1) {
+      expect((await push(blocked(key))).status).toBe(200);
+    }
     const limited = await push(blocked(key));
 
     expect(limited.status).toBe(429);
@@ -268,7 +270,9 @@ describe("主機外掛送推播", () => {
     await register(me.accessToken, first);
     await register(me.accessToken, second);
 
-    for (let index = 0; index < 11; index += 1) await push(blocked(first));
+    for (let index = 0; index < 11; index += 1) {
+      await push(blocked(first));
+    }
 
     expect((await push(blocked(second))).status).toBe(200);
   });
@@ -372,7 +376,9 @@ describe("Agent 完成(done)與種類偏好", () => {
     const key = pairingKey();
     await register(me.accessToken, key, { kinds: ["blocked", "done"] });
 
-    for (let index = 0; index < 10; index += 1) expect((await push(done(key))).status).toBe(200);
+    for (let index = 0; index < 10; index += 1) {
+      expect((await push(done(key))).status).toBe(200);
+    }
     const limited = await push(done(key));
 
     expect(limited.status).toBe(429);
@@ -384,7 +390,9 @@ describe("Agent 完成(done)與種類偏好", () => {
     const key = pairingKey();
     await register(me.accessToken, key);
 
-    for (let index = 0; index < 20; index += 1) expect((await push(done(key))).body).toEqual({ delivered: false });
+    for (let index = 0; index < 20; index += 1) {
+      expect((await push(done(key))).body).toEqual({ delivered: false });
+    }
 
     expect((await push(blocked(key))).body).toEqual({ delivered: true });
     expect(identityProviders.apnsCalls).toHaveLength(1);
@@ -643,7 +651,9 @@ describe("主機服務事件去重(同一組密鑰＋event＋version 24 小時�
   it("去重擋下的重複事件不計入速率限制，之後的「需要你」照常送達", async () => {
     const { key } = await hostServicePairing();
 
-    for (let index = 0; index < 20; index += 1) await push(hostEvent(key, "host_service_updated", "0.7.0"));
+    for (let index = 0; index < 20; index += 1) {
+      await push(hostEvent(key, "host_service_updated", "0.7.0"));
+    }
 
     expect((await push(blocked(key))).body).toEqual({ delivered: true });
     expect(identityProviders.apnsCalls).toHaveLength(2);

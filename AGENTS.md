@@ -31,6 +31,8 @@ CI(`.github/workflows/ci.yml`,PR 與推到 `master`):`npm ci`、`npm run typeche
 
 ## 規範
 
+- `if`／`else`／`for`／`while` 一律加大括號，單行本體也不省略。
+
 - 新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`;API 與 app 的對應改動(例如主機同步欄位)要兩個 repo 一起改。
 
 ## 開發流程

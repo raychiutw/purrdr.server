@@ -25,7 +25,9 @@ export default {
     try {
       return await route(request, env);
     } catch (error) {
-      if (error instanceof ApiError) return errorResponse(error);
+      if (error instanceof ApiError) {
+        return errorResponse(error);
+      }
       console.error(error);
       return errorResponse(new ApiError(500, "internal_error", "Something went wrong."));
     }
@@ -39,7 +41,9 @@ const RATE_LIMIT_PERIOD_SECONDS = 60;
 /// 每個 IP 60 秒最多 60 次(#2)。沒有 `CF-Connecting-IP` 只會是本機(Cloudflare 一律會帶),不限流。
 async function enforceIpRateLimit(request: Request, env: Env, key: string): Promise<void> {
   const ip = request.headers.get("cf-connecting-ip");
-  if (!ip || RATE_LIMIT_EXEMPT.has(key)) return;
+  if (!ip || RATE_LIMIT_EXEMPT.has(key)) {
+    return;
+  }
   const { success } = await env.IP_RATE_LIMITER.limit({ key: ip });
   if (!success) {
     throw new ApiError(429, "rate_limited", "Too many requests. Try again later.", { "retry-after": `${RATE_LIMIT_PERIOD_SECONDS}` });
@@ -148,7 +152,9 @@ async function linkIdentity(request: Request, env: Env): Promise<Response> {
   const identity = await verifyIdToken(env, provider, requireString(body, "idToken"), requireString(body, "nonce"));
 
   const owner = await memberIdFor(env, identity);
-  if (owner === memberId) return json({ member: await memberView(env, memberId), mergedMemberId: null });
+  if (owner === memberId) {
+    return json({ member: await memberView(env, memberId), mergedMemberId: null });
+  }
   if ((await identitiesOf(env, memberId)).some((existing) => existing.provider === provider)) {
     throw new ApiError(409, "provider_already_linked", "This member already has this sign-in method. Unlink it first.");
   }
@@ -165,9 +171,13 @@ async function linkIdentity(request: Request, env: Env): Promise<Response> {
 
   // 對方其餘的身分會跟著對方一起刪掉;其中的 Apple 身分先撤銷(盡力而為，失敗不擋合併)。
   const dropped = (await identitiesOf(env, owner)).filter((other) => other.provider !== provider || other.subject !== identity.subject);
-  if (!(await absorbIdentity(env, memberId, owner, identity, appleRefreshToken))) throw identityInUse();
+  if (!(await absorbIdentity(env, memberId, owner, identity, appleRefreshToken))) {
+    throw identityInUse();
+  }
   for (const other of dropped) {
-    if (other.apple_refresh_token) await revokeAppleToken(env, other.apple_refresh_token);
+    if (other.apple_refresh_token) {
+      await revokeAppleToken(env, other.apple_refresh_token);
+    }
   }
   return json({ member: await memberView(env, memberId), mergedMemberId: owner });
 }
@@ -185,12 +195,16 @@ async function unlinkIdentity(request: Request, env: Env, provider: Provider): P
   const memberId = await authenticate(env, request);
   const identities = await identitiesOf(env, memberId);
   const target = identities.find((identity) => identity.provider === provider);
-  if (!target) throw new ApiError(404, "identity_not_linked", "This sign-in method isn't linked.");
+  if (!target) {
+    throw new ApiError(404, "identity_not_linked", "This sign-in method isn't linked.");
+  }
   if (identities.length === 1) {
     throw new ApiError(409, "last_identity", "Keep at least one sign-in method.");
   }
   await removeIdentity(env, memberId, provider);
-  if (target.apple_refresh_token) await revokeAppleToken(env, target.apple_refresh_token);
+  if (target.apple_refresh_token) {
+    await revokeAppleToken(env, target.apple_refresh_token);
+  }
   return json({ member: await memberView(env, memberId) });
 }
 

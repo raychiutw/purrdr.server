@@ -43,9 +43,13 @@ export async function exchangeAuthorizationCode(env: Env, code: string): Promise
   if (response.status === 400) {
     throw new ApiError(401, "invalid_id_token", "The Sign in with Apple authorization code is invalid or expired.");
   }
-  if (!response.ok) throw new ApiError(502, "provider_unavailable", "Apple couldn't complete sign-in.");
+  if (!response.ok) {
+    throw new ApiError(502, "provider_unavailable", "Apple couldn't complete sign-in.");
+  }
   const body = (await response.json()) as { refresh_token?: unknown };
-  if (typeof body.refresh_token !== "string") throw new ApiError(502, "provider_unavailable", "Apple didn't return a token.");
+  if (typeof body.refresh_token !== "string") {
+    throw new ApiError(502, "provider_unavailable", "Apple didn't return a token.");
+  }
   return body.refresh_token;
 }
 

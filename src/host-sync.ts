@@ -63,9 +63,13 @@ export async function syncHosts(env: Env, memberId: string, request: Request, no
   await requireActiveSubscription(env, memberId, now);
   const body = await readJson(request);
   onlyFields(body, ["changes", "connectionMethods"]);
-  if (!Array.isArray(body.changes)) throw invalid("changes must be an array.");
+  if (!Array.isArray(body.changes)) {
+    throw invalid("changes must be an array.");
+  }
   const understood = understoodMethods(body.connectionMethods);
-  if (body.changes.length > MAX_CHANGES) throw invalid(`At most ${MAX_CHANGES} changes per request.`);
+  if (body.changes.length > MAX_CHANGES) {
+    throw invalid(`At most ${MAX_CHANGES} changes per request.`);
+  }
   // 先全部檢查過才寫入：任何一筆不合法，整個請求不動資料。
   const changes = body.changes.map((change) => parseChange(change, now));
   if (changes.length > 0) {
@@ -76,7 +80,9 @@ export async function syncHosts(env: Env, memberId: string, request: Request, no
 
 /// app 看得懂的連線方式。沒帶是 HTTPS 之前的舊版 app。
 function understoodMethods(value: unknown): ReadonlySet<string> {
-  if (value === undefined) return LEGACY_CONNECTION_METHODS;
+  if (value === undefined) {
+    return LEGACY_CONNECTION_METHODS;
+  }
   if (!Array.isArray(value) || !value.every((method) => typeof method === "string")) {
     throw invalid("connectionMethods must be an array of strings.");
   }
@@ -118,7 +124,9 @@ async function hostsOf(env: Env, memberId: string, understood: ReadonlySet<strin
       deletedHostIds.push(row.host_id);
       continue;
     }
-    if (!understood.has(row.connection_method!)) continue;
+    if (!understood.has(row.connection_method!)) {
+      continue;
+    }
     const host: SyncedHostView = {
       id: row.host_id,
       name: row.name!,
@@ -129,7 +137,9 @@ async function hostsOf(env: Env, memberId: string, understood: ReadonlySet<strin
       hostKeyFingerprint: row.host_key_fingerprint,
       modifiedAt: new Date(row.modified_at).toISOString(),
     };
-    if (row.icon !== null) host.icon = row.icon;
+    if (row.icon !== null) {
+      host.icon = row.icon;
+    }
     hosts.push(host);
   }
   return { hosts, deletedHostIds };
@@ -152,28 +162,42 @@ const UPSERT_FIELDS = ["id", "name", "address", "port", "username", "connectionM
 const DELETE_FIELDS = ["id", "deleted"];
 
 function parseChange(value: unknown, now: number): Change {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalid("Each change must be an object.");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalid("Each change must be an object.");
+  }
   const change = value as Record<string, unknown>;
   const id = change.id;
-  if (typeof id !== "string" || !UUID.test(id)) throw invalid("id must be a UUID.");
+  if (typeof id !== "string" || !UUID.test(id)) {
+    throw invalid("id must be a UUID.");
+  }
   if ("deleted" in change) {
     onlyFields(change, DELETE_FIELDS);
-    if (change.deleted !== true) throw invalid("deleted must be true.");
+    if (change.deleted !== true) {
+      throw invalid("deleted must be true.");
+    }
     return { kind: "delete", id: id.toLowerCase() };
   }
   const isHttps = change.connectionMethod === "https";
   onlyFields(change, UPSERT_FIELDS);
   const port = change.port;
-  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) throw invalid("port must be 1–65535.");
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw invalid("port must be 1–65535.");
+  }
   const method = change.connectionMethod;
-  if (typeof method !== "string" || !CONNECTION_METHODS.has(method)) throw invalid("Unknown connectionMethod.");
+  if (typeof method !== "string" || !CONNECTION_METHODS.has(method)) {
+    throw invalid("Unknown connectionMethod.");
+  }
   const fingerprint = change.hostKeyFingerprint ?? null;
   if (fingerprint !== null && (typeof fingerprint !== "string" || !FINGERPRINT.test(fingerprint))) {
     throw invalid("hostKeyFingerprint must be an unpadded SHA-256 base64.");
   }
-  if (isHttps && fingerprint !== null) throw invalid("HTTPS hosts have no hostKeyFingerprint.");
+  if (isHttps && fingerprint !== null) {
+    throw invalid("HTTPS hosts have no hostKeyFingerprint.");
+  }
   const modifiedAt = typeof change.modifiedAt === "string" && ISO_DATE.test(change.modifiedAt) ? Date.parse(change.modifiedAt) : NaN;
-  if (Number.isNaN(modifiedAt)) throw invalid("modifiedAt must be an ISO 8601 time.");
+  if (Number.isNaN(modifiedAt)) {
+    throw invalid("modifiedAt must be an ISO 8601 time.");
+  }
   return {
     kind: "upsert",
     id: id.toLowerCase(),
@@ -191,19 +215,27 @@ function parseChange(value: unknown, now: number): Change {
 }
 
 function icon(value: unknown): string | null {
-  if (value === undefined) return null;
-  if (typeof value !== "string" || !ICON.test(value)) throw invalid("icon must be 1–32 letters or digits.");
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value !== "string" || !ICON.test(value)) {
+    throw invalid("icon must be 1–32 letters or digits.");
+  }
   return value;
 }
 
 function emptyUsername(change: Record<string, unknown>): string {
-  if (change.username !== "") throw invalid("HTTPS hosts have an empty username.");
+  if (change.username !== "") {
+    throw invalid("HTTPS hosts have an empty username.");
+  }
   return "";
 }
 
 /// HTTPS 主機的 address 只能是主機名稱或 IP(scheme 由 app 決定、埠在 port),與 app 的 `HostServiceAddress(host:port:)` 相同。
 function hostName(value: unknown): string {
-  if (typeof value !== "string" || !HOST_NAME.test(value)) throw invalid("HTTPS hosts need a host name in address.");
+  if (typeof value !== "string" || !HOST_NAME.test(value)) {
+    throw invalid("HTTPS hosts need a host name in address.");
+  }
   return value;
 }
 
@@ -218,7 +250,9 @@ function text(change: Record<string, unknown>, field: string, maxLength: number)
 /// 多一個欄位就拒絕：同步內容進不來白名單以外的東西(私鑰、密碼…)。
 function onlyFields(object: Record<string, unknown>, allowed: readonly string[]) {
   const extra = Object.keys(object).filter((key) => !allowed.includes(key));
-  if (extra.length > 0) throw invalid(`Unexpected field: ${extra.join(", ")}.`);
+  if (extra.length > 0) {
+    throw invalid(`Unexpected field: ${extra.join(", ")}.`);
+  }
 }
 
 function invalid(message: string): ApiError {

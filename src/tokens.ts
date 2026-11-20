@@ -57,23 +57,33 @@ export async function revokeRefreshToken(env: Env, refreshToken: string): Promis
 export async function authenticate(env: Env, request: Request): Promise<string> {
   const header = request.headers.get("authorization") ?? "";
   const match = /^Bearer (.+)$/.exec(header);
-  if (!match?.[1]) throw new ApiError(401, "invalid_access_token", "Sign in required.");
+  if (!match?.[1]) {
+    throw new ApiError(401, "invalid_access_token", "Sign in required.");
+  }
   let memberId: string | undefined;
   try {
     const { payload } = await jwtVerify(match[1], secretKey(env), { issuer: ISSUER, audience: AUDIENCE, algorithms: ["HS256"] });
     memberId = payload.sub;
   } catch (error) {
-    if (!(error instanceof errors.JOSEError)) throw error;
+    if (!(error instanceof errors.JOSEError)) {
+      throw error;
+    }
   }
-  if (!memberId) throw new ApiError(401, "invalid_access_token", "Sign in required.");
+  if (!memberId) {
+    throw new ApiError(401, "invalid_access_token", "Sign in required.");
+  }
   const exists = await env.DB.prepare("SELECT 1 FROM members WHERE id = ?").bind(memberId).first();
-  if (!exists) throw new ApiError(401, "invalid_access_token", "Sign in required.");
+  if (!exists) {
+    throw new ApiError(401, "invalid_access_token", "Sign in required.");
+  }
   return memberId;
 }
 
 function randomToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }

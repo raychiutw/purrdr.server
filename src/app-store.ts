@@ -23,7 +23,9 @@ export async function verifySignedData<T extends { signedDate?: number }>(env: E
       throw new SignedDataError("JWS header 不是 App Store 的格式");
     }
     const [leaf, intermediate, root] = header.x5c.map((certificate) => parseCertificate(base64Bytes(certificate)));
-    if (!leaf || !intermediate || !root) throw new SignedDataError("x5c 不完整");
+    if (!leaf || !intermediate || !root) {
+      throw new SignedDataError("x5c 不完整");
+    }
 
     const trustedRoots = env.APPLE_ROOT_CERTIFICATES.split(",").filter((text) => text.trim().length > 0);
     if (!trustedRoots.some((trusted) => equalBytes(base64Bytes(trusted), root.der))) {
@@ -44,8 +46,12 @@ export async function verifySignedData<T extends { signedDate?: number }>(env: E
     }
     return decoded;
   } catch (error) {
-    if (error instanceof SignedDataError) throw error;
-    if (error instanceof CertificateError) throw new SignedDataError(error.message);
+    if (error instanceof SignedDataError) {
+      throw error;
+    }
+    if (error instanceof CertificateError) {
+      throw new SignedDataError(error.message);
+    }
     throw new SignedDataError(error instanceof Error ? error.message : "JWS 驗證失敗");
   }
 }
