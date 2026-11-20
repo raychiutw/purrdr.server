@@ -105,8 +105,7 @@ async function route(request: Request, env: Env): Promise<Response> {
       return json({ devices: await listDevices(env, memberId, url.searchParams.get("currentDeviceId")) });
     }
     case "POST /v1/push":
-      await sendPush(env, request);
-      return json({ delivered: true });
+      return json({ delivered: await sendPush(env, request) });
     default:
       throw new ApiError(404, "not_found", "Not found.");
   }

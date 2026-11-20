@@ -207,7 +207,7 @@ describe("主機外掛送推播", () => {
   });
 
   it.each([
-    ["狀態不是 blocked", { status: "done" }],
+    ["狀態不認得", { status: "running" }],
     ["workspace 名稱是空的", { workspace: "" }],
     ["workspace 名稱太長", { workspace: "w".repeat(101) }],
     ["pane id 形狀不對", { pane: "w1:p1; echo" }],
@@ -301,5 +301,140 @@ describe("主機外掛送推播", () => {
     expect(sent.status).toBe(502);
     expect(sent.body.error.code).toBe("apns_failed");
     expect(await pairingRows()).toHaveLength(1);
+  });
+});
+
+describe("Agent 完成(done)與種類偏好", () => {
+  const done = (key: string) => ({ key, workspace: "weather-app", status: "done", pane: "w2:p1" });
+
+  it("偏好含 done 時轉給 APNs:標題 workspace、「An agent finished.」、AGENT_DONE、active", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["blocked", "done"] });
+
+    const sent = await push(done(key));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+    expect(identityProviders.apnsCalls[0]!.payload).toEqual({
+      aps: {
+        alert: { title: "weather-app", "loc-key": "An agent finished." },
+        sound: "default",
+        "interruption-level": "active",
+        category: "AGENT_DONE",
+      },
+      pairing: await hashOf(key),
+      pane: "w2:p1",
+      status: "done",
+    });
+  });
+
+  it("註冊時沒帶 kinds(舊版 app)只收 blocked:done 回 200 delivered false,不呼叫 APNs", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    expect((await register(me.accessToken, key)).status).toBe(201);
+
+    const sent = await push(done(key));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: false });
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+    expect((await push(blocked(key))).body).toEqual({ delivered: true });
+  });
+
+  it("同一組密鑰再註冊帶 kinds 即更新偏好，不會多一筆", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key);
+
+    expect((await register(me.accessToken, key, { kinds: ["blocked", "done", "host_service"] })).status).toBe(201);
+    expect((await push(done(key))).body).toEqual({ delivered: true });
+
+    expect((await register(me.accessToken, key, { kinds: ["blocked"] })).status).toBe(201);
+    expect((await push(done(key))).body).toEqual({ delivered: false });
+    expect(await pairingRows()).toHaveLength(1);
+  });
+
+  it("再註冊沒帶 kinds(APNs token 輪替)保留原本的偏好", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["done"] });
+
+    await register(me.accessToken, key, { deviceToken: "b2".repeat(32) });
+
+    expect((await push(done(key))).body).toEqual({ delivered: true });
+    expect((await push(blocked(key))).body).toEqual({ delivered: false });
+  });
+
+  it("速率限制對 done 一樣生效", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["blocked", "done"] });
+
+    for (let index = 0; index < 10; index += 1) expect((await push(done(key))).status).toBe(200);
+    const limited = await push(done(key));
+
+    expect(limited.status).toBe(429);
+    expect(limited.body.error.code).toBe("rate_limited");
+  });
+
+  it("訂閱到期後 done 一樣不轉送(403 subscription_required)", async () => {
+    const me = await member();
+    const purchaseDate = Date.now() - 40 * DAY;
+    await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
+    const key = pairingKey();
+    await env.DB.prepare(
+      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, kinds, created_at, updated_at)
+       VALUES (?, ?, 'apns', ?, 'production', '["blocked","done"]', 0, 0)`,
+    )
+      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
+      .run();
+
+    const sent = await push(done(key));
+
+    expect(sent.status).toBe(403);
+    expect(sent.body.error.code).toBe("subscription_required");
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("APNs 回 Unregistered 時 done 一樣回 410 pairing_revoked 並刪掉配對", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key, { kinds: ["done"] });
+    identityProviders.apnsReplies = [{ status: 410, reason: "Unregistered" }];
+
+    const sent = await push(done(key));
+
+    expect(sent.status).toBe(410);
+    expect(sent.body.error.code).toBe("pairing_revoked");
+    expect(await pairingRows()).toHaveLength(0);
+  });
+
+  it("遠端關閉的配對送 done 回 410 pairing_revoked,只回一次", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await env.DB.prepare("INSERT INTO revoked_push_pairings (key_hash, member_id, revoked_at) VALUES (?, ?, ?)").bind(await hashOf(key), me.id, Date.now()).run();
+
+    const first = await push(done(key));
+    const second = await push(done(key));
+
+    expect(first.status).toBe(410);
+    expect(first.body.error.code).toBe("pairing_revoked");
+    expect(second.status).toBe(404);
+  });
+
+  it.each([
+    ["kinds 不是陣列", { kinds: "done" }],
+    ["kinds 有不認得的種類", { kinds: ["blocked", "chat"] }],
+    ["kinds 的值不是字串", { kinds: [1] }],
+  ])("%s時註冊回 400 invalid_request,什麼都不存", async (_, extra) => {
+    const me = await subscribedMember();
+
+    const registered = await register(me.accessToken, pairingKey(), extra);
+
+    expect(registered.status).toBe(400);
+    expect(registered.body.error.code).toBe("invalid_request");
+    expect(await pairingRows()).toHaveLength(0);
   });
 });
