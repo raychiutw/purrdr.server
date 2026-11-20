@@ -449,7 +449,7 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     return { me, key };
   }
 
-  it("已更新：轉給 APNs,標題「Host service」、內文帶版本、HOST_SERVICE_EVENT、passive,根層 event 與 version", async () => {
+  it("已更新：轉給 APNs,標題「Host service」、內文帶版本、HOST_SERVICE_EVENT、passive 不帶 sound,根層 event 與 version", async () => {
     const { key } = await hostServicePairing();
 
     const sent = await push(hostEvent(key, "host_service_updated", "0.7.0"));
@@ -460,7 +460,6 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { "title-loc-key": "Host service", "loc-key": "Host service updated to %@.", "loc-args": ["0.7.0"] },
-        sound: "default",
         "interruption-level": "passive",
         category: "HOST_SERVICE_EVENT",
       },
@@ -481,7 +480,6 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { "title-loc-key": "Host service", "loc-key": locKey },
-        sound: "default",
         "interruption-level": "passive",
         category: "HOST_SERVICE_EVENT",
       },

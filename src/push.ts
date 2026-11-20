@@ -263,7 +263,6 @@ function hostServicePayload(push: HostServicePush, keyHash: string): Record<stri
   return {
     aps: {
       alert: { "title-loc-key": "Host service", "loc-key": alert.locKey, ...(alert.withVersion ? { "loc-args": [push.version] } : {}) },
-      sound: "default",
       "interruption-level": "passive",
       category: "HOST_SERVICE_EVENT",
     },
