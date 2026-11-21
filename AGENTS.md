@@ -2,7 +2,7 @@
 
 ## 專案性質
 
-Purrdr 的後台：Cloudflare Worker + D1,負責會員登入、訂閱權限、推播轉送與主機同步(聊天與終端機不經過這裡)。從 app repo [`raychiutw/purrdr.ios`](https://github.com/raychiutw/purrdr.ios) 的 `backend/` 抽出(保留歷史),**私人 repo**。API、資料表與上線前設定見 `README.md`。
+Purrdr 的後台：Cloudflare Worker + D1,負責會員登入、訂閱權限、推播轉送與主機同步(聊天與終端機不經過這裡)。從 app repo [`raychiutw/purrdr.ios`](https://github.com/raychiutw/purrdr.ios) 的 `backend/` 抽出(保留歷史),**公開 repo**。API、資料表與上線前設定見 `README.md`。
 
 這個 repo 沒有自己的 ADR、行為規格與詞彙表，一律引用 app repo:
 - 詞彙 [`GLOSSARY.md`](https://github.com/raychiutw/purrdr.ios/blob/master/GLOSSARY.md)
@@ -30,6 +30,8 @@ CI(`.github/workflows/ci.yml`,PR 與推到 `master`):`npm ci`、`npm run typeche
 **後台由使用者手動部署**(`npx wrangler d1 migrations apply purrdr --remote`、`npx wrangler deploy`),不會跟著 app 發布上線，CI 也不部署。Agent 不要執行 deploy、migration `--remote` 或 `wrangler secret`。
 
 ## 規範
+
+- **公開 repo,機密不進 repo。** `wrangler.jsonc` 的 `vars` 只放識別碼(bundle id、Apple Team ID、各 Key ID、Google client ID、Apple 根憑證、App Store ID),這些在 app 或 Apple 端本來就看得到,單獨拿到不能做任何事,所以可以公開。私鑰、`.p8`、簽章密鑰與 token 一律用 `wrangler secret put`(由使用者執行),不寫進程式、測試、文件或 commit message;`.dev.vars`、`.env` 已被 `.gitignore` 擋住。測試用的金鑰由 `vitest.config.ts` 每次現場產生,不使用真的 Apple／Google 金鑰。
 
 - `if`／`else`／`for`／`while` 一律加大括號，單行本體也不省略。
 
