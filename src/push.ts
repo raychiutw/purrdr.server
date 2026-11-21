@@ -19,6 +19,8 @@ const ENVIRONMENTS = new Set(["production", "sandbox"]);
 const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane"]);
 /// 主機服務事件可以送的欄位;與上面的狀態形狀互斥。
 const HOST_SERVICE_PUSH_FIELDS = new Set(["key", "event", "version"]);
+/// 測試通知(#19):只收配對密鑰與事件名，不收 version、pane 等任何其他欄位。
+const TEST_PUSH_FIELDS = new Set(["key", "event"]);
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const MAX_VERSION_LENGTH = 64;
 /// 配對可以選擇要收的推播種類(`host_service` = 主機服務事件;`stuck`、`reminder` 見 purrdr.server#15)。
@@ -126,7 +128,9 @@ type PushStatus = "blocked" | "done" | "stuck" | "reminder";
 type HostServiceEvent = "host_service_update_available" | "host_service_updated" | "host_service_update_rolled_back";
 type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null };
 type HostServicePush = { kind: "host_service"; key: string; event: HostServiceEvent; version: string | null };
-type PushRequest = StatusPush | HostServicePush;
+/// 使用者在 app 帳號頁按「傳送測試通知」:不是配對的推播種類，不受偏好、去重影響。
+type TestPush = { kind: "test"; key: string };
+type PushRequest = StatusPush | HostServicePush | TestPush;
 
 async function readPushRequest(request: Request): Promise<PushRequest> {
   const text = await request.text();
@@ -143,7 +147,10 @@ async function readPushRequest(request: Request): Promise<PushRequest> {
     throw invalid("Request body must be a JSON object.");
   }
   const fields = body as Record<string, unknown>;
-  return fields.event === undefined ? readStatusPush(fields) : readHostServicePush(fields);
+  if (fields.event === undefined) {
+    return readStatusPush(fields);
+  }
+  return fields.event === "test" ? readTestPush(fields) : readHostServicePush(fields);
 }
 
 /// 兩種推播共用：只接受白名單欄位，並驗證配對密鑰。
@@ -175,6 +182,10 @@ function readStatusPush(fields: Record<string, unknown>): StatusPush {
     throw invalid("pane must be a herdr pane id.");
   }
   return { kind: "status", key, workspace, status, pane };
+}
+
+function readTestPush(fields: Record<string, unknown>): TestPush {
+  return { kind: "test", key: readPushKey(fields, TEST_PUSH_FIELDS) };
 }
 
 function readHostServicePush(fields: Record<string, unknown>): HostServicePush {
@@ -231,7 +242,7 @@ async function exceedsRateLimit(env: Env, keyHash: string, now: number): Promise
   return (counted?.rate_count ?? 0) > PUSH_RATE_LIMIT;
 }
 
-/// POST /v1/push:Agent 狀態(需要你、完成、可能卡住、仍在等你)或主機服務事件。
+/// POST /v1/push:Agent 狀態(需要你、完成、可能卡住、仍在等你)、主機服務事件或測試通知(#19)。
 /// 回傳是否真的轉給 APNs(種類不在配對偏好內、或事件 24 小時內送過時不轉)。
 export async function sendPush(env: Env, request: Request): Promise<boolean> {
   const push = await readPushRequest(request);
@@ -250,9 +261,12 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     throw new ApiError(403, "subscription_required", "This needs an active Purrdr Plus subscription.");
   }
   // 不是錯誤：主機端不需要知道使用者的偏好。
-  const kind: PairingKind = push.kind === "host_service" ? "host_service" : push.status;
-  if (!acceptedKinds(pairing).includes(kind)) {
-    return false;
+  // 測試通知是使用者剛按下去的，不看種類偏好。
+  if (push.kind !== "test") {
+    const kind: PairingKind = push.kind === "host_service" ? "host_service" : push.status;
+    if (!acceptedKinds(pairing).includes(kind)) {
+      return false;
+    }
   }
   const hostEvent = push.kind === "host_service" ? push : null;
   if (hostEvent !== null && !(await claimHostServiceEvent(env, keyHash, pairing.member_id, hostEvent, now))) {
@@ -326,6 +340,9 @@ export function apnsPayload(push: PushRequest, keyHash: string): Record<string, 
   if (push.kind === "host_service") {
     return hostServicePayload(push, keyHash);
   }
+  if (push.kind === "test") {
+    return testPayload(keyHash);
+  }
   const alert = STATUS_ALERTS[push.status];
   return {
     aps: {
@@ -338,6 +355,20 @@ export function apnsPayload(push: PushRequest, keyHash: string): Record<string, 
     pairing: keyHash,
     ...(push.pane === null ? {} : { pane: push.pane }),
     status: push.status,
+  };
+}
+
+/// 測試通知:固定內容(app 的字串表以 `loc-key` 翻譯)，active 並出聲，因為使用者正在等結果。
+/// 不帶 category、pane、version;點擊只開 app。
+function testPayload(keyHash: string): Record<string, unknown> {
+  return {
+    aps: {
+      alert: { "title-loc-key": "Purrdr", "loc-key": "This is a test notification from Purrdr." },
+      sound: "default",
+      "interruption-level": "active",
+    },
+    pairing: keyHash,
+    event: "test",
   };
 }
 

@@ -887,3 +887,148 @@ describe("主機服務事件去重(同一組密鑰＋event＋version 24 小時�
     expect((await api("DELETE", "/v1/members/me", { accessToken: me.accessToken })).status).toBe(204);
   });
 });
+
+describe("測試通知(event: test,#19)", () => {
+  const testEvent = (key: string, extra: Record<string, unknown> = {}) => ({ key, event: "test", ...extra });
+
+  it("轉給 APNs:固定內容、active 帶聲音、根層 event test,不帶 pane 與 version", async () => {
+    const { key } = await hostServicePairing(["blocked"]);
+
+    const sent = await push(testEvent(key));
+
+    expect(sent.status).toBe(200);
+    expect(sent.body).toEqual({ delivered: true });
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+    const call = identityProviders.apnsCalls[0]!;
+    expect(call.headers["apns-push-type"]).toBe("alert");
+    expect(call.payload).toEqual({
+      aps: {
+        alert: { "title-loc-key": "Purrdr", "loc-key": "This is a test notification from Purrdr." },
+        sound: "default",
+        "interruption-level": "active",
+      },
+      pairing: await hashOf(key),
+      event: "test",
+    });
+  });
+
+  it.each([
+    ["version", { version: "0.7.0" }],
+    ["workspace", { workspace: "weather-app" }],
+    ["pane", { pane: "w2:p1" }],
+    ["status", { status: "blocked" }],
+    ["message", { message: "secret conversation" }],
+  ])("多帶 %s 欄位回 400 invalid_request,不轉給 APNs", async (_, extra) => {
+    const { key } = await hostServicePairing(["blocked"]);
+
+    const sent = await push(testEvent(key, extra));
+
+    expect(sent.status).toBe(400);
+    expect(sent.body.error.code).toBe("invalid_request");
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("不受種類偏好影響:偏好是空的也送出，同一組配對的 blocked 則不送", async () => {
+    const { key } = await hostServicePairing([]);
+
+    expect((await push(testEvent(key))).body).toEqual({ delivered: true });
+    expect((await push(blocked(key))).body).toEqual({ delivered: false });
+
+    expect(identityProviders.apnsCalls).toHaveLength(1);
+  });
+
+  it("不去重:連按兩次都轉給 APNs", async () => {
+    const { key } = await hostServicePairing(["blocked"]);
+
+    expect((await push(testEvent(key))).body).toEqual({ delivered: true });
+    expect((await push(testEvent(key))).body).toEqual({ delivered: true });
+
+    expect(identityProviders.apnsCalls).toHaveLength(2);
+    const rows = await env.DB.prepare("SELECT COUNT(*) AS count FROM host_service_push_events").first<{ count: number }>();
+    expect(rows?.count).toBe(0);
+  });
+
+  it("沒有 test 的種類:註冊時 kinds 帶 test 仍回 400", async () => {
+    const me = await subscribedMember();
+
+    const registered = await register(me.accessToken, pairingKey(), { kinds: ["blocked", "test"] });
+
+    expect(registered.status).toBe(400);
+    expect(await pairingRows()).toHaveLength(0);
+  });
+
+  it("會員的訂閱到期後不轉送(403 subscription_required)", async () => {
+    const me = await member();
+    const purchaseDate = Date.now() - 40 * DAY;
+    await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
+    const key = pairingKey();
+    await env.DB.prepare(
+      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, created_at, updated_at)
+       VALUES (?, ?, 'apns', ?, 'production', 0, 0)`,
+    )
+      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
+      .run();
+
+    const sent = await push(testEvent(key));
+
+    expect(sent.status).toBe(403);
+    expect(sent.body.error.code).toBe("subscription_required");
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("不認得的密鑰回 404 pairing_not_found", async () => {
+    const sent = await push(testEvent(pairingKey()));
+
+    expect(sent.status).toBe(404);
+    expect(sent.body.error.code).toBe("pairing_not_found");
+  });
+
+  it("遠端關閉的配對回 410 pairing_revoked,只回一次", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await env.DB.prepare("INSERT INTO revoked_push_pairings (key_hash, member_id, revoked_at) VALUES (?, ?, ?)").bind(await hashOf(key), me.id, Date.now()).run();
+
+    const first = await push(testEvent(key));
+    const second = await push(testEvent(key));
+
+    expect(first.status).toBe(410);
+    expect(first.body.error.code).toBe("pairing_revoked");
+    expect(second.status).toBe(404);
+  });
+
+  it("APNs 回 Unregistered 回 410 pairing_revoked 並刪掉配對", async () => {
+    const { key } = await hostServicePairing(["blocked"]);
+    identityProviders.apnsReplies = [{ status: 410, reason: "Unregistered" }];
+
+    const sent = await push(testEvent(key));
+
+    expect(sent.status).toBe(410);
+    expect(sent.body.error.code).toBe("pairing_revoked");
+    expect(await pairingRows()).toHaveLength(0);
+  });
+
+  it("APNs 其他錯誤回 502 apns_failed,配對保留", async () => {
+    const { key } = await hostServicePairing(["blocked"]);
+    identityProviders.apnsReplies = [{ status: 500, reason: "InternalServerError" }];
+
+    const sent = await push(testEvent(key));
+
+    expect(sent.status).toBe(502);
+    expect(sent.body.error.code).toBe("apns_failed");
+    expect(await pairingRows()).toHaveLength(1);
+  });
+
+  it("與狀態推播共用每分鐘 10 則的額度:5 則 blocked 加 5 則 test 之後的 test 回 429", async () => {
+    const { key } = await hostServicePairing(["blocked"]);
+
+    for (let index = 0; index < 5; index += 1) {
+      expect((await push(blocked(key))).status).toBe(200);
+      expect((await push(testEvent(key))).status).toBe(200);
+    }
+    const limited = await push(testEvent(key));
+
+    expect(limited.status).toBe(429);
+    expect(limited.body.error.code).toBe("rate_limited");
+    expect(identityProviders.apnsCalls).toHaveLength(10);
+  });
+});
