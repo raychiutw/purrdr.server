@@ -19,8 +19,9 @@ const ENVIRONMENTS = new Set(["production", "sandbox"]);
 const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane"]);
 /// 主機服務事件可以送的欄位;與上面的狀態形狀互斥。
 const HOST_SERVICE_PUSH_FIELDS = new Set(["key", "event", "version"]);
-/// 測試通知(#19):只收配對密鑰與事件名，不收 version、pane 等任何其他欄位。
-const TEST_PUSH_FIELDS = new Set(["key", "event"]);
+/// 測試通知(#19):配對密鑰、事件名與選填的主機名稱，不收 version、pane 等任何其他欄位。
+const TEST_PUSH_FIELDS = new Set(["key", "event", "host_name"]);
+const MAX_HOST_NAME_LENGTH = 64;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const MAX_VERSION_LENGTH = 64;
 /// 配對可以選擇要收的推播種類(`host_service` = 主機服務事件;`stuck`、`reminder` 見 purrdr.server#15)。
@@ -129,7 +130,7 @@ type HostServiceEvent = "host_service_update_available" | "host_service_updated"
 type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null };
 type HostServicePush = { kind: "host_service"; key: string; event: HostServiceEvent; version: string | null };
 /// 使用者在 app 帳號頁按「傳送測試通知」:不是配對的推播種類，不受偏好、去重影響。
-type TestPush = { kind: "test"; key: string };
+type TestPush = { kind: "test"; key: string; hostName: string | null };
 type PushRequest = StatusPush | HostServicePush | TestPush;
 
 async function readPushRequest(request: Request): Promise<PushRequest> {
@@ -185,7 +186,24 @@ function readStatusPush(fields: Record<string, unknown>): StatusPush {
 }
 
 function readTestPush(fields: Record<string, unknown>): TestPush {
-  return { kind: "test", key: readPushKey(fields, TEST_PUSH_FIELDS) };
+  const key = readPushKey(fields, TEST_PUSH_FIELDS);
+  return { kind: "test", key, hostName: readHostName(fields.host_name) };
+}
+
+/// 選填的主機名稱，只用在測試通知的標題:控制字元(含換行、跳格、Unicode 行／段分隔符)換成空白後修掉頭尾，
+/// 剩下空的當成沒帶;最長 64 個字元(以 code point 計)。不是字串或太長回 400。
+function readHostName(value: unknown): string | null {
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value !== "string") {
+    throw invalid("host_name must be a string.");
+  }
+  const cleaned = value.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").trim();
+  if ([...cleaned].length > MAX_HOST_NAME_LENGTH) {
+    throw invalid("host_name is too long.");
+  }
+  return cleaned === "" ? null : cleaned;
 }
 
 function readHostServicePush(fields: Record<string, unknown>): HostServicePush {
@@ -341,7 +359,7 @@ export function apnsPayload(push: PushRequest, keyHash: string): Record<string, 
     return hostServicePayload(push, keyHash);
   }
   if (push.kind === "test") {
-    return testPayload(keyHash);
+    return testPayload(push, keyHash);
   }
   const alert = STATUS_ALERTS[push.status];
   return {
@@ -358,12 +376,16 @@ export function apnsPayload(push: PushRequest, keyHash: string): Record<string, 
   };
 }
 
-/// 測試通知:固定內容(app 的字串表以 `loc-key` 翻譯)，active 並出聲，因為使用者正在等結果。
-/// 不帶 category、pane、version;點擊只開 app。
-function testPayload(keyHash: string): Record<string, unknown> {
+/// 測試通知:像真正的「需要你」(同樣 active、出聲),但標題與內文都說明是測試;文字由 app 的字串表以 `loc-key` 翻譯。
+/// 有主機名稱時標題帶入(`title-loc-args`),沒有就用「Purrdr」。不帶 category、pane、version;點擊只開 app。
+function testPayload(push: TestPush, keyHash: string): Record<string, unknown> {
+  const title =
+    push.hostName === null
+      ? { "title-loc-key": "Test: Purrdr needs you" }
+      : { "title-loc-key": "Test: %@ needs you", "title-loc-args": [push.hostName] };
   return {
     aps: {
-      alert: { "title-loc-key": "Purrdr", "loc-key": "This is a test notification from Purrdr." },
+      alert: { ...title, "loc-key": "This is a test. When an agent needs your reply or finishes, you'll get a notice like this." },
       sound: "default",
       "interruption-level": "active",
     },

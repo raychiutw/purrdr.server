@@ -891,7 +891,9 @@ describe("主機服務事件去重(同一組密鑰＋event＋version 24 小時�
 describe("測試通知(event: test,#19)", () => {
   const testEvent = (key: string, extra: Record<string, unknown> = {}) => ({ key, event: "test", ...extra });
 
-  it("轉給 APNs:固定內容、active 帶聲音、根層 event test,不帶 pane 與 version", async () => {
+  const TEST_BODY = "This is a test. When an agent needs your reply or finishes, you'll get a notice like this.";
+
+  it("沒帶 host_name:像「需要你」但說明是測試,title 無參數、active 帶聲音、根層 event test,不帶 pane、category 與 version", async () => {
     const { key } = await hostServicePairing(["blocked"]);
 
     const sent = await push(testEvent(key));
@@ -903,13 +905,71 @@ describe("測試通知(event: test,#19)", () => {
     expect(call.headers["apns-push-type"]).toBe("alert");
     expect(call.payload).toEqual({
       aps: {
-        alert: { "title-loc-key": "Purrdr", "loc-key": "This is a test notification from Purrdr." },
+        alert: { "title-loc-key": "Test: Purrdr needs you", "loc-key": TEST_BODY },
         sound: "default",
         "interruption-level": "active",
       },
       pairing: await hashOf(key),
       event: "test",
     });
+  });
+
+  it("帶 host_name:title-loc-key「Test: %@ needs you」,title-loc-args 帶主機名稱", async () => {
+    const { key } = await hostServicePairing(["blocked"]);
+
+    expect((await push(testEvent(key, { host_name: "Home Mac" }))).body).toEqual({ delivered: true });
+
+    expect(identityProviders.apnsCalls[0]!.payload).toEqual({
+      aps: {
+        alert: { "title-loc-key": "Test: %@ needs you", "title-loc-args": ["Home Mac"], "loc-key": TEST_BODY },
+        sound: "default",
+        "interruption-level": "active",
+      },
+      pairing: await hashOf(key),
+      event: "test",
+    });
+  });
+
+  it.each([
+    ["換行與跳格換成空白", "Home\nMac\tPro", "Home Mac Pro"],
+    ["控制字元去掉", "Home\u0007Mac\u0000", "Home Mac"],
+    ["Unicode 行分隔符換成空白", "Home\u2028Mac", "Home Mac"],
+    ["頭尾空白修掉", "  Home Mac  ", "Home Mac"],
+    ["恰好 64 字(以字元計,emoji 算一個)", "🖥".repeat(64), "🖥".repeat(64)],
+  ])("host_name %s", async (_, input, expected) => {
+    const { key } = await hostServicePairing(["blocked"]);
+
+    expect((await push(testEvent(key, { host_name: input }))).status).toBe(200);
+
+    const alert = (identityProviders.apnsCalls[0]!.payload as { aps: { alert: Record<string, unknown> } }).aps.alert;
+    expect(alert["title-loc-args"]).toEqual([expected]);
+  });
+
+  it.each([
+    ["空字串", ""],
+    ["只有空白與換行", " \n\t "],
+  ])("host_name %s:當成沒帶,title 無參數", async (_, input) => {
+    const { key } = await hostServicePairing(["blocked"]);
+
+    expect((await push(testEvent(key, { host_name: input }))).status).toBe(200);
+
+    const alert = (identityProviders.apnsCalls[0]!.payload as { aps: { alert: Record<string, unknown> } }).aps.alert;
+    expect(alert).toEqual({ "title-loc-key": "Test: Purrdr needs you", "loc-key": TEST_BODY });
+  });
+
+  it.each([
+    ["超過 64 字", "a".repeat(65)],
+    ["不是字串(數字)", 123],
+    ["不是字串(物件)", { name: "Home Mac" }],
+    ["null", null],
+  ])("host_name %s回 400 invalid_request,不轉給 APNs", async (_, input) => {
+    const { key } = await hostServicePairing(["blocked"]);
+
+    const sent = await push(testEvent(key, { host_name: input }));
+
+    expect(sent.status).toBe(400);
+    expect(sent.body.error.code).toBe("invalid_request");
+    expect(identityProviders.apnsCalls).toHaveLength(0);
   });
 
   it.each([
