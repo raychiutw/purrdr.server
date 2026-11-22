@@ -168,6 +168,8 @@ async function sha256Hex(text: string): Promise<string> {
 export type IdTokenOptions = {
   subject: string;
   email?: string;
+  /** token 的 `email_verified`;沒帶是 true。 */
+  emailVerified?: boolean;
   /** app 產生的原始 nonce。Apple 的 token 裡是它的 SHA-256(hex),Google 是原文。 */
   nonce?: string;
   audience?: string;
@@ -204,7 +206,8 @@ async function sign(
     ? (env.TEST_APPLE_ID_TOKEN_KEY === privateJson ? env.TEST_GOOGLE_ID_TOKEN_KEY : env.TEST_APPLE_ID_TOKEN_KEY)
     : privateJson;
   const key = await importJWK(JSON.parse(signingJson) as JWK, "RS256");
-  return new SignJWT({ ...defaults.claims, ...(options.email ? { email: options.email } : {}) })
+  const verified = options.emailVerified === undefined ? {} : { email_verified: options.emailVerified };
+  return new SignJWT({ ...defaults.claims, ...verified, ...(options.email ? { email: options.email } : {}) })
     .setProtectedHeader({ alg: "RS256", kid })
     .setIssuer(options.issuer ?? defaults.issuer)
     .setAudience(options.audience ?? defaults.audience)

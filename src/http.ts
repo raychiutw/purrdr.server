@@ -6,6 +6,8 @@ export class ApiError extends Error {
     message: string,
     /** 額外的回應 header(例如 429 的 `retry-after`)。 */
     readonly headers: Record<string, string> = {},
+    /** 額外的結構化內容(例如合併確認的摘要),放在回應的 `error.details`。 */
+    readonly details?: unknown,
   ) {
     super(message);
   }
@@ -16,7 +18,8 @@ export function json(body: unknown, status = 200, headers: Record<string, string
 }
 
 export function errorResponse(error: ApiError): Response {
-  return json({ error: { code: error.code, message: error.message } }, error.status, error.headers);
+  const body = { code: error.code, message: error.message, ...(error.details === undefined ? {} : { details: error.details }) };
+  return json({ error: body }, error.status, error.headers);
 }
 
 /// 讀 JSON body,並確認是物件。

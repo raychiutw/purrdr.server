@@ -16,7 +16,7 @@ function secretKey(env: Env): Uint8Array {
   return new TextEncoder().encode(env.ACCESS_TOKEN_SECRET);
 }
 
-async function signAccessToken(env: Env, memberId: string): Promise<{ accessToken: string; accessTokenExpiresAt: string }> {
+export async function signAccessToken(env: Env, memberId: string): Promise<{ accessToken: string; accessTokenExpiresAt: string }> {
   const expiresAt = Math.floor(Date.now() / 1000) + ACCESS_TOKEN_LIFETIME_SECONDS;
   const accessToken = await new SignJWT({})
     .setProtectedHeader({ alg: "HS256" })

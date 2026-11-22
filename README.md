@@ -25,11 +25,12 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 
 | 方法與路徑 | 權杖 | 說明 |
 |---|---|---|
-| `POST /v1/sessions` | — | 登入。body `{ provider: "apple"\|"google", idToken, nonce, authorizationCode? }`;Apple 必須帶 `authorizationCode`。回 `{ accessToken, accessTokenExpiresAt, refreshToken, memberCreated, member }` |
+| `POST /v1/sessions` | — | 登入。body `{ provider: "apple"\|"google", idToken, nonce, authorizationCode? }`;Apple 必須帶 `authorizationCode`。回 `{ accessToken, accessTokenExpiresAt, refreshToken, memberCreated, autoLinked, member }`;新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email 時歸到那個會員(`autoLinked: true`、`memberCreated: false`),見「規則」的「登入與自動合併」 |
 | `POST /v1/sessions/refresh` | — | body `{ refreshToken }`,換一組新權杖(舊的更新權杖立即失效)。回應同登入，但沒有 `memberCreated` |
 | `POST /v1/sessions/revoke` | — | 登出。body `{ refreshToken }`,回 204 |
 | `GET /v1/members/me` | 存取權杖 | 回 `{ member }` |
-| `POST /v1/members/me/identities` | 存取權杖 | 連結另一種登入方式。body 同登入。回 `{ member, mergedMemberId }` |
+| `POST /v1/members/me/identities` | 存取權杖 | 連結另一種登入方式。body 同登入。回 `{ member, mergedMemberId: null }`;身分已屬於另一個會員時**不合併**,回 409 `merge_required`,`error.details` 是合併確認用的摘要(見下方「合併確認」) |
+| `POST /v1/members/me/identities/merge` | 存取權杖 | 確認合併。body 同連結(要重新帶憑證)。回 `{ member, mergedMemberId, accessToken, accessTokenExpiresAt }` |
 | `DELETE /v1/members/me/identities/{apple\|google}` | 存取權杖 | 解除連結。回 `{ member }` |
 | `DELETE /v1/members/me` | 存取權杖 | 刪除會員。回 204 |
 | `GET /v1/members/me/subscription` | 存取權杖 | 回 `{ subscription }`;從沒訂閱過是 `null` |
@@ -42,6 +43,14 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `DELETE /v1/members/me/push-devices/{deviceId}` | 存取權杖 | 遠端關閉裝置：撤銷它在所有主機的配對(不需要訂閱)。回 204;不是自己的或沒有配對回 404 `device_not_found` |
 | `POST /v1/push` | 配對密鑰 | 主機外掛送「需要你」或「完成」、主機服務送「可能卡住」或「仍在等你」:body 只能有 `{ key, workspace, status: "blocked"\|"done"\|"stuck"\|"reminder", pane? }`。主機服務送事件:body 只能有 `{ key, event: "host_service_update_available"\|"host_service_updated"\|"host_service_update_rolled_back", version? }`(`host_service_updated` 必須帶 `version`)。測試通知(#19,app 帳號頁「傳送測試通知」):body 只能有 `{ key, event: "test", host_name? }`(`host_name` 選填字串，最長 64 字元，控制字元與換行換成空白、頭尾修掉，剩下空的當成沒帶，不是字串或太長 400)。三種形狀互斥;多一個欄位、不認得的 `status`／`event`、`version` 不是語意化版本就 400。回 200 `{ delivered: true }`;種類不在配對的 `kinds` 內，或同一事件與版本 24 小時內送過時不轉 APNs,回 200 `{ delivered: false }`(測試通知不受 `kinds` 與去重影響) |
 | `POST /v1/app-store/notifications` | — | App Store Server Notifications v2 的 webhook。body `{ signedPayload }`,處理完回 200 `{ received: true }` |
+
+**合併確認**(#24):連結時身分屬於另一個會員,回
+`409 { error: { code: "merge_required", message, details: { canMerge, current, other } } }`;`current` 是目前登入的會員、`other` 是擁有該身分的會員,
+兩邊都是 `{ identities: [{ provider, email }], hasActiveSubscription, hostCount }`。`email` 已遮蔽(只留第一個字元與網域,例如 `r***@example.com`;
+沒有或格式不對是 `null`,遮蔽函式在 `src/mask-email.ts`,#25 也用它),不回對方的會員 ID。`hasActiveSubscription` 含帳單寬限期,
+`hostCount` 不含已刪除的主機。`canMerge` 在兩邊都有有效訂閱時是 `false`。使用者確認後呼叫 `POST /v1/members/me/identities/merge`:
+`mergedMemberId` 是被刪除的會員,`member` 是留下的會員;留下的可能是對方,原本的存取權杖屬於被刪的會員(之後 401),
+所以回應附留下會員的新 `accessToken`;更新權杖不變(sessions 一併搬過去)。身分沒有屬於任何會員、或本來就是自己的回 409 `no_merge_needed`。
 
 `member` 的形狀:`{ id, identities: [{ provider, email, linkedAt }] }`(email 可能是 Apple private relay,也可能是 `null`)。
 
@@ -86,7 +95,9 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 413 | `invalid_request` | 推播請求 body 超過 2 KB |
 | 429 | `rate_limited` | 同一個 IP(`CF-Connecting-IP`)60 秒內超過 60 次(帶 `Retry-After` 秒數;App Store 通知不限流),或推播的這組配對密鑰一分鐘內超過 10 則 |
 | 502 | `apns_failed` | APNs 拒絕或連不上(配對保留) |
-| 409 | `identity_in_use` | 要連結的身分屬於另一個有訂閱或同步資料的會員 |
+| 409 | `merge_required` | 連結時身分屬於另一個會員;`error.details` 是合併摘要,確認後改呼叫 `POST /v1/members/me/identities/merge` |
+| 409 | `subscription_conflict` | 確認合併時兩邊都有有效訂閱(一個會員只能有一個);什麼都沒動,要先讓其中一邊不再有效 |
+| 409 | `no_merge_needed` | 確認合併時身分沒有屬於任何會員,或本來就是自己的 |
 | 409 | `subscription_in_use` | 這個 App Store 訂閱已屬於另一個會員 |
 | 409 | `subscription_already_active` | 這個會員已有另一個有效訂閱(一個會員同時最多一個:有效 = 生效中、帳單寬限期、帳單重試期);換訂閱要等原訂閱不再有效 |
 | 409 | `last_identity` | 解除最後一種登入方式 |
@@ -97,7 +108,12 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 
 - **nonce**:app 每次登入產生隨機 nonce,把原文送來。Sign in with Apple 交給 Apple 的是 nonce 的 SHA-256(小寫 hex),Google 是原文;後台依此比對 ID token 的 `nonce`。
 - **權杖**:存取權杖是 HS256 JWT,15 分鐘;更新權杖 90 天、只存雜湊(`sessions`,每次登入一個工作階段)、用一次就輪替。
-- **連結衝突**(ADR-0007):身分屬於另一個會員時，對方沒有 `subscriptions` 也沒有 `synced_hosts` 就併入：身分移過來，對方會員(連同其餘身分、權杖)刪除;對方其餘的 Apple 身分先撤銷(盡力而為)。否則 409 `identity_in_use`。
+- **登入與自動合併**(#24):登入的是**新身分**(不屬於任何會員)時,若 token 的 email 已驗證(`email_verified`)、不是 Apple 私密轉寄、且另一個會員有某個身分 `email_verified = 1`、非私密轉寄、email 相同(不分大小寫),就歸到那個會員並新增這個身分(Apple 一樣換 refresh token)。不自動合併:email 沒驗證或沒有、私密轉寄(兩邊任一邊)、符合的會員不只一個(不猜)、符合的會員已有同一提供者的身分(每種最多一個,沿用 `provider_already_linked` 的精神)。這些情形一律建新會員,使用者之後可在帳號頁手動連結。既有身分再次登入不做合併判斷。
+- **連結與確認合併**(ADR-0007、#24,取代舊的「空會員自動併入」):身分屬於另一個會員時一律先回合併摘要(`merge_required`),不直接合併、也不換 Apple authorization code;使用者確認(app 要 Face ID)後才合併。ADR-0007 原文的「對方有訂閱或同步資料就拒絕」改成下列規則,ADR 另行更新:
+  - 兩邊都有**有效訂閱**(生效中、帳單寬限期、帳單重試期)→ 409 `subscription_conflict`。
+  - 否則**留下資料多的那邊**:有有效訂閱 > 有訂閱列(含過期)或同步主機列(含刪除紀錄) > 空會員;同等時留下目前登入的會員(請求這一邊)。另一邊整個併進來後刪除。
+  - 同一個 D1 batch(單一 transaction)搬 `identities`、`subscriptions`、`synced_hosts`、`devices`、`push_pairings`、`sessions`(連同 `revoked_push_pairings`、`host_service_push_events`)的歸屬,最後刪除被併的會員;任何一步失敗整個 rollback。`synced_hosts` 同一個 `host_id` 兩邊都有時取 `modified_at` 最新者(一樣新留下的那邊)。合併前先把兩邊「狀態還是有效、實際已過期」的訂閱列改成 `expired`,避免佔著有效訂閱的名額。兩邊同時各有有效訂閱的競態由 `subscriptions_one_live_per_member` 擋下,同樣回 `subscription_conflict`。
+  - 兩邊有同一提供者的身分時(每個會員每種最多一個):留下那邊的保留,被併那邊的丟掉,丟掉的 Apple 身分在合併成功後撤銷 Sign in with Apple 權杖(盡力而為,失敗不擋合併)。搬過來的身分保留原有的 refresh token,不撤銷。
 - **解除 Apple**:同時撤銷該 Sign in with Apple 權杖(盡力而為)。
 - **訂閱權限**(ADR-0007):app 購買時以 `appAccountToken` 帶入會員 ID;交易與通知都只信任 App Store 簽的 JWS:`x5c` 三張憑證、最上層與 `APPLE_ROOT_CERTIFICATES` 逐位元組相同、逐層簽章正確、中繼與葉帶 Apple 的 OID、在 `signedDate` 時都在有效期間、JWS 是 ES256 由葉憑證簽(與 App Store Server Library 相同，不做線上 OCSP)。另外檢查 bundle id、環境(Production 與 Sandbox 都收：App Review 與 TestFlight 是 Sandbox)、商品、正式環境通知的 app Apple ID。
 - **訂閱歸屬**:一個 App Store 訂閱(original transaction)只屬於一個會員。已登記的只屬於原會員;`appAccountToken` 是另一個現有會員時不能被領走(409 `subscription_in_use`);沒有 `appAccountToken`(在 App Store 兌換 Offer Code)或原會員已刪除時，歸提交的會員。
@@ -124,7 +140,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
   - 清單：`hostCount` = 配對數(開了幾台主機)、`lastRegisteredAt` = 最後註冊或更新配對的時間(epoch 毫秒)、`current` = 是否等於 `currentDeviceId`;不回 device token、配對密鑰與雜湊。只列至少有一組配對的裝置，最新的在前。
   - 舊版 app 沒帶 `deviceId` 的配對以 device token 歸類，`deviceId` 是 `legacy-` 加 token 的 SHA-256 前 32 位 hex,`name`／`model` 為 `null`(app 顯示「未命名裝置」);可用這個 id 撤銷或改名;改名存在 `devices.name`(舊版 app 的新配對以同一組 device token 歸成同一台)。0009 遷移前就存在的舊配對,`devices.id` 是 `token:<device token>`,對外一律換成同一個 `legacy-` 加雜湊的 id,device token 不出後台。
   - 遠端關閉：刪除配對並記入 `revoked_push_pairings`,主機外掛之後用那組密鑰送推播回 410 `pairing_revoked`(外掛據此清掉本機的 `push-<裝置>` 目錄);同一組密鑰重新註冊就恢復。410 只回一次(回完刪掉紀錄，之後是 404),每次遠端關閉時順手刪掉 90 天前的紀錄。以密鑰撤銷(`DELETE .../push-pairings/{keyHash}`,裝置自己關)則照舊回 404。
-- **合併規則**:會員只要有 `subscriptions` 列(不論是否過期)或 `synced_hosts` 列(含刪除紀錄)就不是空會員。
+- **「有資料」的定義**(決定合併時留哪邊):會員只要有 `subscriptions` 列(不論是否過期)或 `synced_hosts` 列(含刪除紀錄)就不是空會員。
 - **主機同步**(#30、ADR-0007):
   - 要有效的 Purrdr Plus,讀取也是;到期後資料保留(續訂後接著用),刪除會員時一起刪。
   - 以單一主機為單位**最後修改者勝**:比 `modifiedAt`,比已存的新才取代，一樣新時保留已存的;回應永遠是套用後的整份清單，app 以它為準。

@@ -2,11 +2,10 @@ import { exchangeAuthorizationCode, revokeAppleToken } from "./apple";
 import { ApiError, errorResponse, json, readJson, requireString } from "./http";
 import { parseProvider, verifyIdToken, type Provider, type VerifiedIdentity } from "./identity";
 import {
-  absorbIdentity,
   addIdentity,
+  autoMergeTarget,
   createMember,
   deleteMember,
-  hasDataBlockingMerge,
   identitiesOf,
   memberIdFor,
   memberView,
@@ -14,10 +13,11 @@ import {
   removeIdentity,
 } from "./members";
 import { syncHosts } from "./host-sync";
+import { mergeMembers, mergeSummary } from "./merge";
 import { registerPairing, revokePairing, sendPush } from "./push";
 import { listDevices, renameDevice, revokeDevice } from "./push-devices";
 import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
-import { authenticate, issueTokens, revokeRefreshToken, rotateRefreshToken } from "./tokens";
+import { authenticate, issueTokens, revokeRefreshToken, rotateRefreshToken, signAccessToken } from "./tokens";
 
 /// Purrdr 後台(ADR-0004、ADR-0007)。API 一覽見 README.md。
 export default {
@@ -85,6 +85,8 @@ async function route(request: Request, env: Env): Promise<Response> {
       return removeMember(request, env);
     case "POST /v1/members/me/identities":
       return linkIdentity(request, env);
+    case "POST /v1/members/me/identities/merge":
+      return confirmMerge(request, env);
     case "DELETE /v1/members/me/identities/apple":
       return unlinkIdentity(request, env, "apple");
     case "DELETE /v1/members/me/identities/google":
@@ -128,66 +130,76 @@ async function verifiedCredential(
 }
 
 /// POST /v1/sessions:用 Apple 或 Google 登入;沒有會員就建立一個。
+///
+/// 新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email(不分大小寫)時,歸到那個會員並新增這個身分
+/// (`autoLinked: true`);規則見 `autoMergeTarget`。
 async function signIn(request: Request, env: Env): Promise<Response> {
   const { identity, appleRefreshToken } = await verifiedCredential(env, await readJson(request));
   let memberId = await memberIdFor(env, identity);
-  const memberCreated = memberId === null;
-  if (memberId === null) {
-    memberId = await createMember(env, identity, appleRefreshToken);
-  } else {
+  let memberCreated = false;
+  let autoLinked = false;
+  if (memberId !== null) {
     await refreshIdentity(env, identity, appleRefreshToken);
+  } else {
+    const target = await autoMergeTarget(env, identity);
+    if (target === null) {
+      memberId = await createMember(env, identity, appleRefreshToken);
+      memberCreated = true;
+    } else {
+      await addIdentity(env, target, identity, appleRefreshToken);
+      memberId = target;
+      autoLinked = true;
+    }
   }
   const tokens = await issueTokens(env, memberId);
-  return json({ ...tokens, memberCreated, member: await memberView(env, memberId) });
+  return json({ ...tokens, memberCreated, autoLinked, member: await memberView(env, memberId) });
 }
 
-/// POST /v1/members/me/identities:連結另一種登入方式。
-///
-/// 這個身分已屬於另一個會員時：對方沒有訂閱也沒有同步資料就併入並刪除對方(回傳 `mergedMemberId`),
-/// 否則 409 `identity_in_use`,使用者要先登入那個會員把它刪掉(ADR-0007)。
-async function linkIdentity(request: Request, env: Env): Promise<Response> {
+/// 連結與確認合併共用:驗證憑證(不換 Apple authorization code,確定要做才換),回傳這個身分目前屬於誰。
+async function linkingCredential(request: Request, env: Env) {
   const memberId = await authenticate(env, request);
   const body = await readJson(request);
   const provider = parseProvider(body.provider);
   const identity = await verifyIdToken(env, provider, requireString(body, "idToken"), requireString(body, "nonce"));
+  const exchange = async () => (provider === "apple" ? exchangeAuthorizationCode(env, requireString(body, "authorizationCode")) : null);
+  return { memberId, provider, identity, owner: await memberIdFor(env, identity), exchange };
+}
 
-  const owner = await memberIdFor(env, identity);
+/// POST /v1/members/me/identities:連結另一種登入方式。
+///
+/// 這個身分已屬於另一個會員時不直接合併:回 409 `merge_required`,`error.details` 是兩個會員的摘要
+/// (見 `mergeSummary`),由使用者確認後再呼叫 `POST /v1/members/me/identities/merge`。
+async function linkIdentity(request: Request, env: Env): Promise<Response> {
+  const { memberId, provider, identity, owner, exchange } = await linkingCredential(request, env);
   if (owner === memberId) {
     return json({ member: await memberView(env, memberId), mergedMemberId: null });
   }
   if ((await identitiesOf(env, memberId)).some((existing) => existing.provider === provider)) {
     throw new ApiError(409, "provider_already_linked", "This member already has this sign-in method. Unlink it first.");
   }
-  if (owner !== null && (await hasDataBlockingMerge(env, owner))) {
-    throw identityInUse();
+  if (owner !== null) {
+    throw new ApiError(
+      409,
+      "merge_required",
+      "This sign-in method belongs to another member. Confirm to merge the two members.",
+      {},
+      await mergeSummary(env, memberId, owner),
+    );
   }
-
-  const appleRefreshToken =
-    provider === "apple" ? await exchangeAuthorizationCode(env, requireString(body, "authorizationCode")) : null;
-  if (owner === null) {
-    await addIdentity(env, memberId, identity, appleRefreshToken);
-    return json({ member: await memberView(env, memberId), mergedMemberId: null });
-  }
-
-  // 對方其餘的身分會跟著對方一起刪掉;其中的 Apple 身分先撤銷(盡力而為，失敗不擋合併)。
-  const dropped = (await identitiesOf(env, owner)).filter((other) => other.provider !== provider || other.subject !== identity.subject);
-  if (!(await absorbIdentity(env, memberId, owner, identity, appleRefreshToken))) {
-    throw identityInUse();
-  }
-  for (const other of dropped) {
-    if (other.apple_refresh_token) {
-      await revokeAppleToken(env, other.apple_refresh_token);
-    }
-  }
-  return json({ member: await memberView(env, memberId), mergedMemberId: owner });
+  await addIdentity(env, memberId, identity, await exchange());
+  return json({ member: await memberView(env, memberId), mergedMemberId: null });
 }
 
-function identityInUse(): ApiError {
-  return new ApiError(
-    409,
-    "identity_in_use",
-    "This sign-in method belongs to another member with a subscription or synced hosts. Sign in with it and delete that member first.",
-  );
+/// POST /v1/members/me/identities/merge:確認合併(body 同連結,要重新帶憑證)。規則見 `mergeMembers`。
+/// 回 `{ member, mergedMemberId, accessToken, accessTokenExpiresAt }`:留下的可能是對方,原本的存取權杖屬於被刪的會員,
+/// 所以回應附留下會員的新存取權杖;更新權杖不變。
+async function confirmMerge(request: Request, env: Env): Promise<Response> {
+  const { memberId, identity, owner, exchange } = await linkingCredential(request, env);
+  if (owner === null || owner === memberId) {
+    throw new ApiError(409, "no_merge_needed", "This sign-in method doesn't belong to another member.");
+  }
+  const { survivorId, mergedMemberId } = await mergeMembers(env, memberId, owner, identity, exchange);
+  return json({ ...(await signAccessToken(env, survivorId)), member: await memberView(env, survivorId), mergedMemberId });
 }
 
 /// DELETE /v1/members/me/identities/{provider}:解除連結，至少保留一種登入方式。
