@@ -3,7 +3,7 @@ import { ApiError } from "./http";
 import type { Provider, VerifiedIdentity } from "./identity";
 import { maskEmail } from "./mask-email";
 import { hasDataBlockingMerge, identitiesOf, sealedAppleToken } from "./members";
-import { hasActiveSubscription } from "./subscriptions";
+import { holdsLiveSlot } from "./subscriptions";
 
 /// 合併確認要給使用者看的單邊摘要(不含完整 email 與會員 ID)。
 export type MergeSideSummary = {
@@ -29,7 +29,7 @@ async function sideSummary(env: Env, memberId: string): Promise<MergeSideSummary
     .first<{ count: number }>();
   return {
     identities: results.map((row) => ({ provider: row.provider, email: maskEmail(row.email) })),
-    hasActiveSubscription: await hasActiveSubscription(env, memberId),
+    hasActiveSubscription: await holdsLiveSlot(env, memberId),
     hostCount: hosts?.count ?? 0,
   };
 }
@@ -44,9 +44,9 @@ function subscriptionConflict(): ApiError {
   return new ApiError(409, "subscription_conflict", "Both members have an active subscription. Only one can be kept; cancel one first.");
 }
 
-/// 資料多的那邊要留下來:有效訂閱 > 有訂閱或同步資料(含過期、刪除紀錄) > 空會員。同等時留目前登入的會員。
+/// 資料多的那邊要留下來:佔著有效訂閱名額(生效、寬限、帳單重試,同 `holdsLiveSlot`) > 有訂閱或同步資料(含過期、刪除紀錄) > 空會員。同等時留目前登入的會員。
 async function dataRank(env: Env, memberId: string): Promise<number> {
-  if (await hasActiveSubscription(env, memberId)) {
+  if (await holdsLiveSlot(env, memberId)) {
     return 2;
   }
   return (await hasDataBlockingMerge(env, memberId)) ? 1 : 0;
@@ -95,8 +95,10 @@ export async function mergeMembers(
       env.DB.prepare("DELETE FROM identities WHERE member_id = ? AND provider IN (SELECT provider FROM identities WHERE member_id = ?)").bind(L, S),
       env.DB.prepare("UPDATE identities SET member_id = ? WHERE member_id = ?").bind(S, L),
       env.DB.prepare(
-        `UPDATE identities SET email = COALESCE(?, email), email_verified = ?, is_private_relay = ?,
-           apple_refresh_token = COALESCE(?, apple_refresh_token) WHERE provider = ? AND subject = ?`,
+        `UPDATE identities SET email = COALESCE(?1, email),
+           email_verified = CASE WHEN ?1 IS NULL THEN email_verified ELSE ?2 END,
+           is_private_relay = CASE WHEN ?1 IS NULL THEN is_private_relay ELSE ?3 END,
+           apple_refresh_token = COALESCE(?4, apple_refresh_token) WHERE provider = ?5 AND subject = ?6`,
       ).bind(identity.email, identity.emailVerified ? 1 : 0, identity.isPrivateRelay ? 1 : 0, sealed, identity.provider, identity.subject),
       env.DB.prepare("UPDATE subscriptions SET member_id = ? WHERE member_id = ?").bind(S, L),
       // 同一台主機兩邊都有:先刪掉較舊(或一樣新)的 L 那份,再刪掉被 L 較新的那份蓋過的 S 那份,最後把剩下的搬過來。

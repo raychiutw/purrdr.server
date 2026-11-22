@@ -24,6 +24,7 @@ import {
   issueTokens,
   listSessions,
   parseDeviceId,
+  parsePlatform,
   revokeOtherSession,
   revokeRefreshToken,
   rotateRefreshToken,
@@ -61,6 +62,15 @@ async function enforceIpRateLimit(request: Request, env: Env, key: string): Prom
   }
 }
 
+/// 路徑片段解碼;壞的 escape(例如 `%E0%A4%A`)回 400 而不是 500。
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new ApiError(400, "invalid_request", "Malformed path.");
+  }
+}
+
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
@@ -68,22 +78,22 @@ async function route(request: Request, env: Env): Promise<Response> {
   await enforceIpRateLimit(request, env, key);
   const pairingPath = /^DELETE \/v1\/members\/me\/push-pairings\/([^/]+)$/.exec(key);
   if (pairingPath) {
-    await revokePairing(env, await authenticate(env, request), decodeURIComponent(pairingPath[1]!));
+    await revokePairing(env, await authenticate(env, request), decodeSegment(pairingPath[1]!));
     return new Response(null, { status: 204 });
   }
   const devicePath = /^(DELETE|PATCH) \/v1\/members\/me\/push-devices\/([^/]+)$/.exec(key);
   if (devicePath?.[1] === "DELETE") {
-    await revokeDevice(env, await authenticate(env, request), decodeURIComponent(devicePath[2]!));
+    await revokeDevice(env, await authenticate(env, request), decodeSegment(devicePath[2]!));
     return new Response(null, { status: 204 });
   }
   if (devicePath?.[1] === "PATCH") {
     const memberId = await authenticate(env, request);
-    return json({ device: await renameDevice(env, memberId, decodeURIComponent(devicePath[2]!), request, url.searchParams.get("currentDeviceId")) });
+    return json({ device: await renameDevice(env, memberId, decodeSegment(devicePath[2]!), request, url.searchParams.get("currentDeviceId")) });
   }
   const sessionPath = /^DELETE \/v1\/members\/me\/sessions\/([^/]+)$/.exec(key);
   if (sessionPath) {
     const { memberId, sessionId } = await authenticateSession(env, request);
-    await revokeOtherSession(env, memberId, sessionId, decodeURIComponent(sessionPath[1]!));
+    await revokeOtherSession(env, memberId, sessionId, decodeSegment(sessionPath[1]!));
     return new Response(null, { status: 204 });
   }
   switch (key) {
@@ -166,10 +176,11 @@ async function verifiedCredential(
 /// POST /v1/sessions:用 Apple 或 Google 登入;沒有會員就建立一個。
 ///
 /// 新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email(不分大小寫)時,歸到那個會員並新增這個身分
-/// (`autoLinked: true`);規則見 `autoMergeTarget`。選填 `deviceId`(app Keychain 的 UUID)。
+/// (`autoLinked: true`);規則見 `autoMergeTarget`。選填 `deviceId`(app Keychain 的 UUID)與 `platform`(ios|android,預設 ios)。
 async function signIn(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
   const deviceId = parseDeviceId(body.deviceId);
+  const platform = parsePlatform(body.platform);
   const { identity, appleRefreshToken } = await verifiedCredential(env, body);
   let memberId = await memberIdFor(env, identity);
   let memberCreated = false;
@@ -187,7 +198,7 @@ async function signIn(request: Request, env: Env): Promise<Response> {
       autoLinked = true;
     }
   }
-  const tokens = await issueTokens(env, memberId, deviceId);
+  const tokens = await issueTokens(env, memberId, deviceId, platform);
   return json({ ...tokens, memberCreated, autoLinked, member: await memberView(env, memberId) });
 }
 
@@ -230,9 +241,13 @@ async function linkIdentity(request: Request, env: Env): Promise<Response> {
 /// 回 `{ member, mergedMemberId, accessToken, accessTokenExpiresAt }`:留下的可能是對方,原本的存取權杖屬於被刪的會員,
 /// 所以回應附留下會員的新存取權杖;更新權杖不變。
 async function confirmMerge(request: Request, env: Env): Promise<Response> {
-  const { memberId, sessionId, identity, owner, exchange } = await linkingCredential(request, env);
+  const { memberId, sessionId, provider, identity, owner, exchange } = await linkingCredential(request, env);
   if (owner === null || owner === memberId) {
     throw new ApiError(409, "no_merge_needed", "This sign-in method doesn't belong to another member.");
+  }
+  // 與連結一致:目前會員已有這個提供者時拒絕,否則合併會悄悄丟掉其中一個(可能是剛驗證的那個,Apple authorization code 也已消耗)。
+  if ((await identitiesOf(env, memberId)).some((existing) => existing.provider === provider)) {
+    throw new ApiError(409, "provider_already_linked", "This member already has this sign-in method. Unlink it first.");
   }
   const { survivorId, mergedMemberId } = await mergeMembers(env, memberId, owner, identity, exchange);
   return json({ ...(await signAccessToken(env, survivorId, sessionId)), member: await memberView(env, survivorId), mergedMemberId });

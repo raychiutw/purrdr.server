@@ -128,8 +128,11 @@ export async function deleteMember(env: Env, memberId: string): Promise<void> {
 /// 既有身分再次登入：更新 email 與(有的話)新的 Apple refresh token。
 export async function refreshIdentity(env: Env, identity: VerifiedIdentity, appleRefreshToken: string | null): Promise<void> {
   await env.DB.prepare(
-    `UPDATE identities SET email = COALESCE(?, email), email_verified = ?, is_private_relay = ?,
-       apple_refresh_token = COALESCE(?, apple_refresh_token) WHERE provider = ? AND subject = ?`,
+    // token 沒帶 email 時,email 與其驗證狀態都維持原樣。
+    `UPDATE identities SET email = COALESCE(?1, email),
+       email_verified = CASE WHEN ?1 IS NULL THEN email_verified ELSE ?2 END,
+       is_private_relay = CASE WHEN ?1 IS NULL THEN is_private_relay ELSE ?3 END,
+       apple_refresh_token = COALESCE(?4, apple_refresh_token) WHERE provider = ?5 AND subject = ?6`,
   )
     .bind(
       identity.email,

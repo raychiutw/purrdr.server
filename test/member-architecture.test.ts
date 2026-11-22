@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { DAY, submitTransaction } from "./app-store";
-import { api, insertPairing, signInWithApple, signInWithGoogle } from "./fakes";
+import { api, googleIdToken, insertPairing, signInWithApple, signInWithGoogle } from "./fakes";
 
 // 新資料結構(#22)上的 API 行為:登入記錄 email 驗證狀態、工作階段、一個會員一個有效訂閱、遷移來的舊裝置。
 
@@ -79,7 +79,11 @@ describe("工作階段(sessions)", () => {
   });
 
   it("登出撤銷工作階段(留下撤銷時間),之後換不到權杖", async () => {
-    const signIn = await signInWithApple("apple-1");
+    // 帶 deviceId 的裝置會留著撤銷紀錄;沒帶的佔位裝置登出後連同工作階段列一起清掉。
+    const nonce = "nonce-1";
+    const signIn = await api("POST", "/v1/sessions", {
+      body: { provider: "google", idToken: await googleIdToken({ subject: "google-1", nonce }), nonce, deviceId: "aaaaaaaa-1111-4111-8111-bbbbbbbbbbbb" },
+    });
 
     expect((await api("POST", "/v1/sessions/revoke", { body: { refreshToken: signIn.body.refreshToken } })).status).toBe(204);
 

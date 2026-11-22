@@ -25,7 +25,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 
 | 方法與路徑 | 權杖 | 說明 |
 |---|---|---|
-| `POST /v1/sessions` | — | 登入。body `{ provider: "apple"\|"google", idToken, nonce, authorizationCode?, deviceId? }`;Apple 必須帶 `authorizationCode`。`deviceId` 選填,是 app 存在 Keychain 的 UUID(1~64 字元的英數與 `.` `_` `:` `-`,不合 400 `invalid_request`):帶了就以它建立或更新裝置,並撤銷這支裝置舊的工作階段(每裝置一個;換會員登入同理);沒帶(舊 app)維持每次登入建一個裝置。回 `{ accessToken, accessTokenExpiresAt, refreshToken, memberCreated, autoLinked, member }`;新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email 時歸到那個會員(`autoLinked: true`、`memberCreated: false`),見「規則」的「登入與自動合併」 |
+| `POST /v1/sessions` | — | 登入。body `{ provider: "apple"\|"google", idToken, nonce, authorizationCode?, deviceId?, platform? }`;Apple 必須帶 `authorizationCode`。`deviceId` 選填,是 app 存在 Keychain 的 UUID(1~64 字元的英數與 `.` `_` `:` `-`,不合 400 `invalid_request`;大小寫不拘,後台一律存小寫):帶了就以它建立或更新裝置,並撤銷這支裝置舊的工作階段(每裝置一個);別的會員在這支裝置上還有未撤銷的工作階段時不動那列,這次登入另建一列裝置(見「規則」的「裝置與工作階段」);沒帶(舊 app)維持每次登入建一個裝置。`platform` 選填(`ios`|`android`,預設 `ios`,不合法 400 `invalid_request`),寫進新建的裝置列。回 `{ accessToken, accessTokenExpiresAt, refreshToken, memberCreated, autoLinked, member }`;新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email 時歸到那個會員(`autoLinked: true`、`memberCreated: false`),見「規則」的「登入與自動合併」 |
 | `POST /v1/sessions/refresh` | — | body `{ refreshToken }`,換一組新權杖。舊的更新權杖有 60 秒寬限:寬限內重送回傳**同一組**新權杖;寬限外再用舊權杖視為外洩,撤銷該工作階段並回 401。回應同登入，但沒有 `memberCreated` |
 | `POST /v1/sessions/revoke` | — | 登出。body `{ refreshToken }`,回 204 |
 | `GET /v1/members/me/sessions` | 存取權杖 | 列出自己未撤銷、未過期的工作階段(每裝置一個)。回 `{ sessions: [{ id, deviceId, deviceName, deviceModel, createdAt, lastActiveAt, expiresAt, current }] }`;`current` 是發出這個存取權杖的工作階段;`deviceName`／`deviceModel` 沒有時為 `null`;時間為 ISO 8601。存取權杖所屬的工作階段已撤銷也回 401 |
@@ -92,7 +92,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 404 | `session_not_found` | 撤銷工作階段:`id` 不存在或不是自己的 |
 | 409 | `cannot_revoke_current_session` | 撤銷工作階段:不能撤銷目前這個(要登出請用 `POST /v1/sessions/revoke`) |
 | 404 | `identity_not_linked` | 解除沒有連結的登入方式 |
-| 409 | `provider_already_linked` | 連結時已經有同一種登入方式(每種最多一個) |
+| 409 | `provider_already_linked` | 連結或確認合併時已經有同一種登入方式(每種最多一個) |
 | 400 | `invalid_transaction` | 交易簽章驗不過，或不是這個 app、不是 Purrdr Plus、環境不是 Production／Sandbox(StoreKit 設定檔的交易一律驗不過) |
 | 400 | `invalid_notification` | App Store 通知簽章驗不過，或 bundle id、環境(`data.environment` 與交易的 `environment` 不一致也算)、app Apple ID 不對 |
 | 400 | `invalid_purchase` | Google Play 購買驗不過:商品不在白名單(或與 Google 回的不一致)、Google 查無此 purchase token |
@@ -176,16 +176,20 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
   - 寬限外重送舊權杖 → 撤銷該工作階段(新權杖也失效),回 401 `invalid_refresh_token`。只記得「上一個」權杖,更早的權杖查不到,一律當無效權杖(401,不撤銷)。
   - 已撤銷或已過期的工作階段,寬限內的舊權杖也換不到。
   - 登出(`POST /v1/sessions/revoke`)也認寬限內的舊權杖。
-- **裝置與工作階段**:`deviceId` 是 app 產生並存 Keychain 的 UUID,不是秘密,但知道它的人登入自己的帳號會把該裝置列改歸自己並撤銷原本的工作階段;`deviceId` 只會在持有人自己的 `GET .../sessions` 回應裡出現。沒帶 `deviceId` 的舊 app,每次登入產生一個新的裝置列,舊工作階段不會被撤銷(可從別的裝置在列表撤銷)。
-
+- **裝置與工作階段**:`deviceId` 是 app 產生並存 Keychain 的 UUID(後台一律存小寫),**不是秘密、也不證明持有**,所以不能憑它接管別人的裝置:
+  - 該裝置列屬於別的會員、而且那個會員在這支裝置上還有未撤銷(未過期)的工作階段時,不動那一列、不撤銷它的工作階段,這次登入另建一列裝置(`anon:` 開頭的佔位 id)照常登入。
+  - 沒有這一列、列的 `member_id` 為 `NULL`、屬於同一個會員,或原會員已登出(工作階段都撤銷了)時沿用該列;同一支手機換會員登入屬於最後一種。裝置改歸新會員時,原會員在這支裝置的推播配對一併撤銷(寫 `revoked_push_pairings`、刪 `push_pairings`,同一個 batch),新會員不會收到原會員主機的通知。
+  - 沒帶 `deviceId` 的舊 app,每次登入產生一個 `anon:` 佔位裝置列,舊工作階段不會被撤銷(可從別的裝置在列表撤銷);佔位裝置在沒有推播權杖、沒有配對、沒有未撤銷工作階段時(工作階段被登出或被撤銷)連同它的工作階段列一起刪除。已撤銷的佔位工作階段因此查不到,再次撤銷回 404 而不是 204。
+  - `deviceId` 只會在持有人自己的 `GET .../sessions` 回應裡出現。
 - **nonce**:app 每次登入產生隨機 nonce,把原文送來。Sign in with Apple 交給 Apple 的是 nonce 的 SHA-256(小寫 hex),Google 是原文;後台依此比對 ID token 的 `nonce`。
 - **權杖**:存取權杖是 HS256 JWT,15 分鐘;更新權杖 90 天、只存雜湊(`sessions`,每支裝置一個未撤銷的工作階段)、用一次就輪替。存取權杖帶 `sid`(工作階段 ID)。
-- **登入與自動合併**(#24):登入的是**新身分**(不屬於任何會員)時,若 token 的 email 已驗證(`email_verified`)、不是 Apple 私密轉寄、且另一個會員有某個身分 `email_verified = 1`、非私密轉寄、email 相同(不分大小寫),就歸到那個會員並新增這個身分(Apple 一樣換 refresh token)。不自動合併:email 沒驗證或沒有、私密轉寄(兩邊任一邊)、符合的會員不只一個(不猜)、符合的會員已有同一提供者的身分(每種最多一個,沿用 `provider_already_linked` 的精神)。這些情形一律建新會員,使用者之後可在帳號頁手動連結。既有身分再次登入不做合併判斷。
+- **登入與自動合併**(#24):登入的是**新身分**(不屬於任何會員)時,若 token 的 email 已驗證(`email_verified`)、不是 Apple 私密轉寄、且另一個會員有某個身分 `email_verified = 1`、非私密轉寄、email 相同(不分大小寫),就歸到那個會員並新增這個身分(Apple 一樣換 refresh token)。不自動合併:email 沒驗證或沒有、私密轉寄(兩邊任一邊)、符合的會員不只一個(不猜)、符合的會員已有同一提供者的身分(每種最多一個,沿用 `provider_already_linked` 的精神)。這些情形一律建新會員,使用者之後可在帳號頁手動連結。既有身分再次登入不做合併判斷。既有身分再次登入(與確認合併)時 token 沒帶 email,則 email、`email_verified`、`is_private_relay` 都維持原值,不被洗掉。
 - **連結與確認合併**(ADR-0007、#24,取代舊的「空會員自動併入」):身分屬於另一個會員時一律先回合併摘要(`merge_required`),不直接合併、也不換 Apple authorization code;使用者確認(app 要 Face ID)後才合併。ADR-0007 原文的「對方有訂閱或同步資料就拒絕」改成下列規則,ADR 另行更新:
-  - 兩邊都有**有效訂閱**(生效中、帳單寬限期、帳單重試期)→ 409 `subscription_conflict`。
+  - 兩邊都有**有效訂閱**(佔著名額:生效中、帳單寬限期、帳單重試期,即 `holdsLiveSlot`)→ 409 `subscription_conflict`。合併摘要的 `hasActiveSubscription`／`canMerge` 與此一致(帳單重試期也算 `true`)。
   - 否則**留下資料多的那邊**:有有效訂閱 > 有訂閱列(含過期)或同步主機列(含刪除紀錄) > 空會員;同等時留下目前登入的會員(請求這一邊)。另一邊整個併進來後刪除。
   - 同一個 D1 batch(單一 transaction)搬 `identities`、`subscriptions`、`synced_hosts`、`devices`、`push_pairings`、`sessions`(連同 `revoked_push_pairings`、`host_service_push_events`)的歸屬,最後刪除被併的會員;任何一步失敗整個 rollback。`synced_hosts` 同一個 `host_id` 兩邊都有時取 `modified_at` 最新者(一樣新留下的那邊)。合併前先把兩邊「狀態還是有效、實際已過期」的訂閱列改成 `expired`,避免佔著有效訂閱的名額。兩邊同時各有有效訂閱的競態由 `subscriptions_one_live_per_member` 擋下,同樣回 `subscription_conflict`。
-  - 兩邊有同一提供者的身分時(每個會員每種最多一個):留下那邊的保留,被併那邊的丟掉,丟掉的 Apple 身分在合併成功後撤銷 Sign in with Apple 權杖(盡力而為,失敗不擋合併)。搬過來的身分保留原有的 refresh token,不撤銷。
+  - 確認合併時,目前會員已有「剛驗證的那個提供者」→ 409 `provider_already_linked`(同連結;否則合併會悄悄丟掉其中一個,可能是剛驗證的,Apple authorization code 也已消耗),不動資料。
+  - 兩邊有同一提供者的身分(不含剛驗證的那個提供者,每個會員每種最多一個)時:留下那邊的保留,被併那邊的丟掉,丟掉的 Apple 身分在合併成功後撤銷 Sign in with Apple 權杖(盡力而為,失敗不擋合併)。搬過來的身分保留原有的 refresh token,不撤銷。
 - **解除 Apple**:同時撤銷該 Sign in with Apple 權杖(盡力而為)。
 - **訂閱權限**(ADR-0007):app 購買時以 `appAccountToken` 帶入會員 ID;交易與通知都只信任 App Store 簽的 JWS:`x5c` 三張憑證、最上層與 `APPLE_ROOT_CERTIFICATES` 逐位元組相同、逐層簽章正確、中繼與葉帶 Apple 的 OID、在 `signedDate` 時都在有效期間、JWS 是 ES256 由葉憑證簽(與 App Store Server Library 相同，不做線上 OCSP)。另外檢查 bundle id、環境(Production 與 Sandbox 都收：App Review 與 TestFlight 是 Sandbox)、商品、正式環境通知的 app Apple ID。
 - **訂閱歸屬**:一個 App Store 訂閱(original transaction)只屬於一個會員。已登記的只屬於原會員;`appAccountToken` 是另一個現有會員時不能被領走(409 `subscription_in_use`);沒有 `appAccountToken`(在 App Store 兌換 Offer Code)或原會員已刪除時，歸提交的會員。

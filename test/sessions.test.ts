@@ -60,8 +60,9 @@ describe("登入帶 deviceId", () => {
     expect((await refresh(b.body.refreshToken)).status).toBe(200);
   });
 
-  it("這支裝置換另一個會員登入:舊會員在這支裝置的工作階段被撤銷,裝置改歸新會員", async () => {
+  it("這支裝置換另一個會員登入(舊會員已登出):裝置改歸新會員,舊會員的工作階段早已撤銷", async () => {
     const old = await signInOn(DEVICE_A, "google-1");
+    await api("POST", "/v1/sessions/revoke", { body: { refreshToken: old.body.refreshToken } });
     const next = await signInOn(DEVICE_A, "google-2");
 
     expect(next.body.member.id).not.toBe(old.body.member.id);
