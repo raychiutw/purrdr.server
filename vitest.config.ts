@@ -19,7 +19,15 @@ function testKeys() {
   const p8 = generateKeyPairSync("ec", { namedCurve: "P-256" });
   // APNs 驗證金鑰(.p8)的替身;假 APNs 端點用公鑰驗證 provider token。
   const apns = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  // App Store Server API 的 In-App Purchase 金鑰(.p8)的替身;假 App Store Server API 用公鑰驗 JWT。
+  const appStoreApi = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  // Google Play Developer API 服務帳戶金鑰的替身(RSA,RS256);假 Google token 端點用公鑰驗 assertion。
+  const googlePlay = generateKeyPairSync("rsa", { modulusLength: 2048 });
   return {
+    googlePlayPrivateKey: googlePlay.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+    googlePlayPublicJwk: JSON.stringify(googlePlay.publicKey.export({ format: "jwk" })),
+    appStoreApiPrivateKey: appStoreApi.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+    appStoreApiPublicJwk: JSON.stringify(appStoreApi.publicKey.export({ format: "jwk" })),
     appleIdTokenKey: JSON.stringify(rsa()),
     googleIdTokenKey: JSON.stringify(rsa()),
     applePrivateKey: p8.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
@@ -40,7 +48,9 @@ export default defineConfig({
       process.env.APPLE_PRIVATE_KEY = keys.applePrivateKey;
       process.env.ACCESS_TOKEN_SECRET = accessTokenSecret;
       process.env.APNS_PRIVATE_KEY = keys.apnsPrivateKey;
+      process.env.APP_STORE_API_KEY = keys.appStoreApiPrivateKey;
       process.env.APPLE_TOKEN_ENCRYPTION_KEY = appleTokenEncryptionKey;
+      process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_KEY = keys.googlePlayPrivateKey;
       return {
         wrangler: { configPath: "./wrangler.jsonc" },
         miniflare: {
@@ -60,6 +70,17 @@ export default defineConfig({
             APNS_KEY_ID: "TESTAPNS12",
             APNS_PRIVATE_KEY: keys.apnsPrivateKey,
             TEST_APNS_PUBLIC_JWK: keys.apnsPublicJwk,
+            APP_STORE_API_KEY_ID: "TESTAPI123",
+            APP_STORE_API_ISSUER_ID: "11111111-2222-3333-4444-555555555555",
+            APP_STORE_API_KEY: keys.appStoreApiPrivateKey,
+            TEST_APP_STORE_API_PUBLIC_JWK: keys.appStoreApiPublicJwk,
+            GOOGLE_PLAY_PACKAGE_NAME: "com.raychiu.purrdr.test",
+            GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL: "play-api@purrdr-test.iam.gserviceaccount.com",
+            GOOGLE_PLAY_PRODUCT_IDS: "plus.monthly,plus.yearly",
+            GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL: "rtdn-push@purrdr-test.iam.gserviceaccount.com",
+            GOOGLE_PLAY_PUBSUB_AUDIENCE: "https://backend.test/v1/google-play/notifications",
+            GOOGLE_PLAY_SERVICE_ACCOUNT_KEY: keys.googlePlayPrivateKey,
+            TEST_GOOGLE_PLAY_PUBLIC_JWK: keys.googlePlayPublicJwk,
           },
         },
       };

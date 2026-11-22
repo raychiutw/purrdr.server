@@ -25,6 +25,45 @@ export type ApnsCall = {
 /// 假 APNs 的回應:200 成功，否則帶 Apple 的 reason(例如 410 `Unregistered`、400 `BadDeviceToken`)。
 export type ApnsReply = { status: number; reason?: string };
 
+/// 送到假 App Store Server API 的一個請求。
+export type AppStoreApiCall = {
+  method: string;
+  /** `production` = api.storekit.apple.com、`sandbox` = api.storekit-sandbox.apple.com。 */
+  environment: "production" | "sandbox";
+  path: string;
+  /** 請求的 JWT:ES256、kid／iss／aud／bid 正確、有 iat 與不超過 60 分鐘的 exp,且用測試金鑰的公鑰驗得過。 */
+  jwtValid: boolean;
+  body: any;
+};
+
+/// 假 App Store Server API 的回應;handler 丟例外等於連不上。
+export type AppStoreApiReply = { status: number; body?: unknown };
+
+/// 送到假 Google Play Developer API(androidpublisher.googleapis.com)的一個請求。
+export type GooglePlayApiCall = {
+  method: string;
+  path: string;
+  /** Bearer 是假 Google token 端點發的 access token。 */
+  authorized: boolean;
+  body: any;
+};
+
+/// 假 Google OAuth token 端點收到的服務帳戶 JWT assertion。
+export type GoogleTokenCall = {
+  /** RS256、iss 是服務帳戶 email、scope 是 androidpublisher、aud 是 token 端點、exp 不超過 iat + 1 小時,且用測試金鑰的公鑰驗得過。 */
+  assertionValid: boolean;
+  grantType: string | null;
+};
+
+export type GooglePlayApiReply = { status: number; body?: unknown };
+
+export const GOOGLE_PLAY_ACCESS_TOKEN = "google-play-test-access-token";
+
+const APP_STORE_API_ORIGINS: Record<string, AppStoreApiCall["environment"]> = {
+  "https://api.storekit.apple.com": "production",
+  "https://api.storekit-sandbox.apple.com": "sandbox",
+};
+
 const APNS_ORIGINS: Record<string, ApnsCall["environment"]> = {
   "https://api.push.apple.com": "production",
   "https://api.sandbox.push.apple.com": "sandbox",
@@ -41,6 +80,21 @@ class IdentityProviders {
   apnsCalls: ApnsCall[] = [];
   /** 假 APNs 依序回的結果;用完之後一律 200。 */
   apnsReplies: ApnsReply[] = [];
+  /// 假 App Store Server API 收到的請求。
+  appStoreApiCalls: AppStoreApiCall[] = [];
+  /// 假 App Store Server API 的回應;預設是 404(查無此交易)。測試自己簽 JWS 放進 body。
+  appStoreApiHandler: (call: AppStoreApiCall) => AppStoreApiReply | Promise<AppStoreApiReply> = () => ({
+    status: 404,
+    body: { errorCode: 4040010, errorMessage: "Transaction id not found." },
+  });
+  /// 假 Google Play Developer API 收到的請求(不含 token 端點)。
+  googlePlayCalls: GooglePlayApiCall[] = [];
+  /// 假 Google token 端點收到的 assertion。
+  googleTokenCalls: GoogleTokenCall[] = [];
+  /// token 端點回的狀態碼。
+  googleTokenStatus = 200;
+  /// 假 Developer API 的回應;預設 404。handler 丟例外等於連不上。
+  googlePlayHandler: (call: GooglePlayApiCall) => GooglePlayApiReply | Promise<GooglePlayApiReply> = () => ({ status: 404, body: { error: { code: 404 } } });
   private spy: ReturnType<typeof vi.spyOn> | undefined;
 
   install() {
@@ -50,6 +104,12 @@ class IdentityProviders {
     this.appleTokenStatus = 200;
     this.apnsCalls = [];
     this.apnsReplies = [];
+    this.appStoreApiCalls = [];
+    this.appStoreApiHandler = () => ({ status: 404, body: { errorCode: 4040010, errorMessage: "Transaction id not found." } });
+    this.googlePlayCalls = [];
+    this.googleTokenCalls = [];
+    this.googleTokenStatus = 200;
+    this.googlePlayHandler = () => ({ status: 404, body: { error: { code: 404 } } });
     this.spy = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => this.route(new Request(input, init)));
   }
 
@@ -64,7 +124,22 @@ class IdentityProviders {
     if (apnsEnvironment && request.method === "POST" && url.pathname.startsWith("/3/device/")) {
       return this.apns(request, apnsEnvironment, url.pathname.slice("/3/device/".length));
     }
+    const appStoreApiEnvironment = APP_STORE_API_ORIGINS[url.origin];
+    if (appStoreApiEnvironment) {
+      return this.appStoreApi(request, appStoreApiEnvironment, url.pathname);
+    }
+    if (url.origin === "https://androidpublisher.googleapis.com") {
+      return this.googlePlay(request, url.pathname);
+    }
     switch (route) {
+      case "POST https://oauth2.googleapis.com/token": {
+        const form = new URLSearchParams(new TextDecoder().decode(await request.arrayBuffer()));
+        this.googleTokenCalls.push({ assertionValid: await verifyGoogleAssertion(form.get("assertion")), grantType: form.get("grant_type") });
+        if (this.googleTokenStatus !== 200) {
+          return Response.json({ error: "invalid_grant" }, { status: this.googleTokenStatus });
+        }
+        return Response.json({ access_token: GOOGLE_PLAY_ACCESS_TOKEN, token_type: "Bearer", expires_in: 3600 });
+      }
       case "GET https://appleid.apple.com/auth/keys":
         return Response.json({ keys: [publicJwk(env.TEST_APPLE_ID_TOKEN_KEY, APPLE_KID)] });
       case "GET https://www.googleapis.com/oauth2/v3/certs":
@@ -103,6 +178,35 @@ class IdentityProviders {
     }
   }
 
+  /// App Store Server API:驗 JWT、記錄請求,回應交給測試的 handler。
+  private async appStoreApi(request: Request, environment: AppStoreApiCall["environment"], path: string): Promise<Response> {
+    const authorization = request.headers.get("authorization") ?? "";
+    const text = await request.text();
+    const call: AppStoreApiCall = {
+      method: request.method,
+      environment,
+      path,
+      jwtValid: authorization.startsWith("Bearer ") && (await verifyAppStoreApiToken(authorization.slice("Bearer ".length))),
+      body: text ? JSON.parse(text) : null,
+    };
+    this.appStoreApiCalls.push(call);
+    const reply = await this.appStoreApiHandler(call);
+    return reply.body === undefined ? new Response(null, { status: reply.status }) : Response.json(reply.body, { status: reply.status });
+  }
+
+  private async googlePlay(request: Request, path: string): Promise<Response> {
+    const text = await request.text();
+    const call: GooglePlayApiCall = {
+      method: request.method,
+      path,
+      authorized: request.headers.get("authorization") === `Bearer ${GOOGLE_PLAY_ACCESS_TOKEN}`,
+      body: text ? JSON.parse(text) : null,
+    };
+    this.googlePlayCalls.push(call);
+    const reply = await this.googlePlayHandler(call);
+    return reply.body === undefined ? new Response(null, { status: reply.status }) : Response.json(reply.body, { status: reply.status });
+  }
+
   /// APNs provider API(HTTP/2 POST /3/device/<token>):驗 provider token、記錄 header 與 payload。
   private async apns(request: Request, environment: ApnsCall["environment"], deviceToken: string): Promise<Response> {
     const headers: Record<string, string> = {};
@@ -134,6 +238,71 @@ async function verifyApnsProviderToken(token: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/// App Store Server API 的 JWT:ES256、kid 是 API Key ID、iss 是 Issuer ID、aud 是 appstoreconnect-v1、bid 是 bundle id,exp 在 iat 之後 60 分鐘內。
+async function verifyAppStoreApiToken(token: string): Promise<boolean> {
+  try {
+    const key = await importJWK(JSON.parse(env.TEST_APP_STORE_API_PUBLIC_JWK) as JWK, "ES256");
+    const { payload, protectedHeader } = await jwtVerify(token, key, {
+      issuer: env.APP_STORE_API_ISSUER_ID,
+      audience: "appstoreconnect-v1",
+      algorithms: ["ES256"],
+    });
+    const { iat, exp, bid } = payload as { iat?: number; exp?: number; bid?: string };
+    return (
+      protectedHeader.kid === env.APP_STORE_API_KEY_ID &&
+      protectedHeader.typ === "JWT" &&
+      bid === env.APPLE_CLIENT_ID &&
+      typeof iat === "number" &&
+      typeof exp === "number" &&
+      exp > iat &&
+      exp - iat <= 3600
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function verifyGoogleAssertion(assertion: string | null): Promise<boolean> {
+  if (!assertion) {
+    return false;
+  }
+  try {
+    const key = await importJWK({ ...(JSON.parse(env.TEST_GOOGLE_PLAY_PUBLIC_JWK) as JWK), alg: "RS256" }, "RS256");
+    const { payload } = await jwtVerify(assertion, key, {
+      issuer: env.GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL,
+      audience: "https://oauth2.googleapis.com/token",
+      algorithms: ["RS256"],
+    });
+    const { iat, exp, scope } = payload as { iat?: number; exp?: number; scope?: string };
+    return scope === "https://www.googleapis.com/auth/androidpublisher" && typeof iat === "number" && typeof exp === "number" && exp > iat && exp - iat <= 3600;
+  } catch {
+    return false;
+  }
+}
+
+/// Pub/Sub push 帶的 OIDC token:Google 簽(假的 Google JWKS),iss 是 accounts.google.com。
+export type PubSubTokenOptions = {
+  audience?: string;
+  email?: string;
+  emailVerified?: boolean;
+  issuer?: string;
+  expiresIn?: string;
+  forged?: boolean;
+};
+
+export async function pubSubToken(options: PubSubTokenOptions = {}): Promise<string> {
+  return sign(
+    env.TEST_GOOGLE_ID_TOKEN_KEY,
+    GOOGLE_KID,
+    { subject: "rtdn-push-subject", forged: options.forged, expiresIn: options.expiresIn, issuer: options.issuer, audience: options.audience ?? env.GOOGLE_PLAY_PUBSUB_AUDIENCE },
+    {
+      issuer: "https://accounts.google.com",
+      audience: env.GOOGLE_PLAY_PUBSUB_AUDIENCE,
+      claims: { email: options.email ?? env.GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL, email_verified: options.emailVerified ?? true },
+    },
+  );
 }
 
 function publicJwk(privateJson: string, kid: string): JWK {
@@ -168,6 +337,8 @@ async function sha256Hex(text: string): Promise<string> {
 export type IdTokenOptions = {
   subject: string;
   email?: string;
+  /** token 的 `email_verified`;沒帶是 true。 */
+  emailVerified?: boolean;
   /** app 產生的原始 nonce。Apple 的 token 裡是它的 SHA-256(hex),Google 是原文。 */
   nonce?: string;
   audience?: string;
@@ -204,7 +375,8 @@ async function sign(
     ? (env.TEST_APPLE_ID_TOKEN_KEY === privateJson ? env.TEST_GOOGLE_ID_TOKEN_KEY : env.TEST_APPLE_ID_TOKEN_KEY)
     : privateJson;
   const key = await importJWK(JSON.parse(signingJson) as JWK, "RS256");
-  return new SignJWT({ ...defaults.claims, ...(options.email ? { email: options.email } : {}) })
+  const verified = options.emailVerified === undefined ? {} : { email_verified: options.emailVerified };
+  return new SignJWT({ ...defaults.claims, ...verified, ...(options.email ? { email: options.email } : {}) })
     .setProtectedHeader({ alg: "RS256", kid })
     .setIssuer(options.issuer ?? defaults.issuer)
     .setAudience(options.audience ?? defaults.audience)
@@ -255,4 +427,29 @@ export async function signInWithGoogle(subject: string, extra: Partial<IdTokenOp
   return api("POST", "/v1/sessions", {
     body: { provider: "google", idToken: await googleIdToken({ subject, nonce, ...extra }), nonce },
   });
+}
+
+/// 直接寫入一組(舊式)推播配對,繞過 API:用在測試「配對已存在、但會員訂閱已到期」之類 API 建不出來的狀態。
+/// 沒帶 `deviceId` 的比照 0009 遷移,以 `token:<device token>` 當 devices.id(對外會是 `legacy-<雜湊>`)。
+export async function insertPairing(options: {
+  keyHash: string;
+  memberId: string;
+  deviceToken: string;
+  deviceId?: string;
+  kinds?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}): Promise<void> {
+  const createdAt = options.createdAt ?? 0;
+  const deviceId = options.deviceId ?? `token:${options.deviceToken}`;
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO devices (id, member_id, platform, push_token, push_environment, created_at, last_seen_at)
+       VALUES (?, ?, 'ios', ?, 'production', ?, ?)
+       ON CONFLICT (id) DO UPDATE SET push_token = excluded.push_token`,
+    ).bind(deviceId, options.memberId, options.deviceToken, createdAt, createdAt),
+    env.DB.prepare(
+      `INSERT INTO push_pairings (id, member_id, device_id, key_hash, kinds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(crypto.randomUUID(), options.memberId, deviceId, options.keyHash, options.kinds ?? '["blocked"]', createdAt, options.updatedAt ?? createdAt),
+  ]);
 }

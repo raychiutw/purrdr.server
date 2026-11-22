@@ -138,11 +138,30 @@ export function renewalInfo(options: RenewalOptions = {}) {
   };
 }
 
+/// 通知的 data.status 預設值(依 Apple 文件的生命週期表)。
+function defaultStatus(options: { notificationType: string; subtype?: string }): number {
+  switch (options.notificationType) {
+    case "EXPIRED":
+      return 2;
+    case "GRACE_PERIOD_EXPIRED":
+      return 3;
+    case "DID_FAIL_TO_RENEW":
+      return options.subtype === "GRACE_PERIOD" ? 4 : 3;
+    case "REFUND":
+    case "REVOKE":
+      return 5;
+    default:
+      return 1;
+  }
+}
+
 export type NotificationOptions = {
   notificationType: string;
   subtype?: string;
   transaction?: TransactionOptions;
   renewal?: RenewalOptions | null;
+  /** data.status(Apple 的訂閱狀態 1~5);沒帶時依通知類型給一個符合 Apple 文件的值。 */
+  status?: number | null;
   environment?: string;
   bundleId?: string;
   appAppleId?: number;
@@ -151,7 +170,7 @@ export type NotificationOptions = {
 };
 
 /// App Store Server Notifications v2 的 signedPayload。
-export async function notification(options: NotificationOptions): Promise<string> {
+export async function notification(options: NotificationOptions & { notificationUUID?: string }): Promise<string> {
   const environment = options.environment ?? "Sandbox";
   const tx = transaction({ environment, ...options.transaction });
   const data = {
@@ -163,13 +182,13 @@ export async function notification(options: NotificationOptions): Promise<string
     ...(options.renewal === null
       ? {}
       : { signedRenewalInfo: await signJws(renewalInfo({ environment, originalTransactionId: tx.originalTransactionId, ...options.renewal }), options.chain) }),
-    status: 1,
+    ...(options.status === null ? {} : { status: options.status ?? defaultStatus(options) }),
   };
   return signJws(
     {
       notificationType: options.notificationType,
       ...(options.subtype ? { subtype: options.subtype } : {}),
-      notificationUUID: crypto.randomUUID(),
+      notificationUUID: options.notificationUUID ?? crypto.randomUUID(),
       version: "2.0",
       signedDate: options.signedDate ?? Date.now(),
       data,

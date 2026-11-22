@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { DAY, submitTransaction } from "./app-store";
-import { api, identityProviders, signInWithApple } from "./fakes";
+import { api, identityProviders, insertPairing, signInWithApple } from "./fakes";
 
 /// 通知裝置(purrdr.server#5):會員看得到哪些裝置會收到通知，可以遠端關閉或改名，不必拿到那支裝置。
 
@@ -54,12 +54,7 @@ async function expiredMemberWithPhone() {
   const me = { accessToken: signIn.body.accessToken as string, id: signIn.body.member.id as string };
   const purchaseDate = Date.now() - 40 * DAY;
   await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
-  await env.DB.prepare(
-    `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, device_id, created_at, updated_at)
-     VALUES (?, ?, 'apns', ?, 'production', ?, 0, 0)`,
-  )
-    .bind(await hashOf(pairingKey()), me.id, PHONE_TOKEN, PHONE_ID)
-    .run();
+  await insertPairing({ keyHash: await hashOf(pairingKey()), memberId: me.id, deviceToken: PHONE_TOKEN, deviceId: PHONE_ID });
   return me;
 }
 

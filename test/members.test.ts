@@ -25,11 +25,11 @@ async function count(table: string): Promise<number> {
 async function giveSubscription(memberId: string) {
   const now = Date.now();
   await env.DB.prepare(
-    `INSERT INTO entitlements (store, original_transaction_id, member_id, environment, product_id, transaction_id,
-       purchased_at, expires_at, transaction_signed_at, updated_at)
-     VALUES ('app_store', ?, ?, 'Sandbox', 'com.raychiu.purrdr.plus.monthly', '1', ?, ?, ?, ?)`,
+    `INSERT INTO subscriptions (id, member_id, store, external_id, product_id, status, expires_at, environment, updated_at,
+       current_transaction_id, purchased_at, transaction_signed_at)
+     VALUES (?, ?, 'app_store', ?, 'com.raychiu.purrdr.plus.monthly', 'active', ?, 'sandbox', ?, '1', ?, ?)`,
   )
-    .bind(`original-${memberId}`, memberId, now, now + 86_400_000, now, now)
+    .bind(crypto.randomUUID(), memberId, `original-${memberId}`, now + 86_400_000, now, now, now)
     .run();
 }
 
@@ -78,51 +78,16 @@ describe("連結登入方式", () => {
     expect(link.body.error.code).toBe("provider_already_linked");
   });
 
-  it("要連結的身分屬於另一個空的會員時，自動併入並刪除那個會員", async () => {
+  it("要連結的身分屬於另一個會員時不直接合併，回 409 merge_required(合併流程見 identity-merge.test.ts)", async () => {
     const apple = await signInWithApple("apple-user-1");
     const otherGoogle = await signInWithGoogle("google-user-1");
-
-    const link = await linkGoogle(apple.body.accessToken, "google-user-1");
-
-    expect(link.status).toBe(200);
-    expect(link.body.mergedMemberId).toBe(otherGoogle.body.member.id);
-    expect(link.body.member.identities).toHaveLength(2);
-    expect(await count("members")).toBe(1);
-    // 被併掉的會員的權杖一起失效。
-    expect((await api("GET", "/v1/members/me", { accessToken: otherGoogle.body.accessToken })).status).toBe(401);
-    const google = await signInWithGoogle("google-user-1");
-    expect(google.body.member.id).toBe(apple.body.member.id);
-  });
-
-  it("被併入的空會員另有一個 Apple 身分時，那個身分撤銷後一起刪掉(一個會員只能有一個 Apple)", async () => {
-    const mine = await signInWithApple("apple-user-1");
-    const other = await signInWithApple("apple-user-2");
-    await linkGoogle(other.body.accessToken, "google-user-2");
-
-    const link = await linkGoogle(mine.body.accessToken, "google-user-2");
-
-    expect(link.status).toBe(200);
-    expect(link.body.mergedMemberId).toBe(other.body.member.id);
-    expect(identityProviders.appleRevokeCalls).toEqual([
-      { token: "apple-refresh-for-code-apple-user-2", tokenTypeHint: "refresh_token", clientSecretValid: true },
-    ]);
-    const again = await signInWithApple("apple-user-2");
-    expect(again.body.memberCreated).toBe(true);
-  });
-
-  it.each([
-    ["有訂閱", giveSubscription],
-    ["有主機同步資料", giveSyncedHost],
-  ])("要連結的身分屬於另一個%s的會員時拒絕，兩邊都不變", async (_, giveData) => {
-    const apple = await signInWithApple("apple-user-1");
-    const otherGoogle = await signInWithGoogle("google-user-1");
-    await giveData(otherGoogle.body.member.id);
 
     const link = await linkGoogle(apple.body.accessToken, "google-user-1");
 
     expect(link.status).toBe(409);
-    expect(link.body.error.code).toBe("identity_in_use");
+    expect(link.body.error.code).toBe("merge_required");
     expect(await count("members")).toBe(2);
+    expect((await api("GET", "/v1/members/me", { accessToken: otherGoogle.body.accessToken })).status).toBe(200);
     const google = await signInWithGoogle("google-user-1");
     expect(google.body.member.id).toBe(otherGoogle.body.member.id);
   });
@@ -204,7 +169,7 @@ describe("刪除會員", () => {
     expect(identityProviders.appleRevokeCalls).toEqual([
       { token: "apple-refresh-for-code-apple-user-1", tokenTypeHint: "refresh_token", clientSecretValid: true },
     ]);
-    for (const table of ["members", "identities", "refresh_tokens", "entitlements", "synced_hosts"]) {
+    for (const table of ["members", "identities", "sessions", "devices", "subscriptions", "synced_hosts"]) {
       expect(await count(table), table).toBe(0);
     }
     expect((await api("GET", "/v1/members/me", { accessToken: apple.body.accessToken })).status).toBe(401);

@@ -12,7 +12,22 @@ export function parseProvider(value: unknown): Provider {
 }
 
 /// 驗證過的登入身分。
-export type VerifiedIdentity = { provider: Provider; subject: string; email: string | null };
+export type VerifiedIdentity = {
+  provider: Provider;
+  subject: string;
+  email: string | null;
+  /** token 的 `email_verified`(Apple 可能是字串 "true")。自動合併只信已驗證且不是私密轉寄的 email。 */
+  emailVerified: boolean;
+  /** Apple「隱藏我的電子郵件」的私密轉寄 email。 */
+  isPrivateRelay: boolean;
+};
+
+const PRIVATE_RELAY_DOMAIN = "@privaterelay.appleid.com";
+
+/// JWT 的布林 claim:Apple 有時送字串 "true"／"false"。
+function truthyClaim(value: unknown): boolean {
+  return value === true || value === "true";
+}
 
 const appleKeys = createRemoteJWKSet(new URL("https://appleid.apple.com/auth/keys"));
 const googleKeys = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
@@ -51,7 +66,15 @@ export async function verifyIdToken(env: Env, provider: Provider, idToken: strin
     throw new ApiError(401, "invalid_id_token", "The sign-in credential has no subject.");
   }
   const email = typeof payload.email === "string" ? payload.email : null;
-  return { provider, subject: payload.sub, email };
+  const isPrivateRelay =
+    provider === "apple" && (truthyClaim(payload.is_private_email) || (email?.toLowerCase().endsWith(PRIVATE_RELAY_DOMAIN) ?? false));
+  return {
+    provider,
+    subject: payload.sub,
+    email,
+    emailVerified: email !== null && !isPrivateRelay && truthyClaim(payload.email_verified),
+    isPrivateRelay,
+  };
 }
 
 export async function sha256Hex(text: string): Promise<string> {
