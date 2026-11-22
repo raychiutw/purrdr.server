@@ -12,5 +12,7 @@ declare namespace Cloudflare {
     TEST_APP_STORE_ROOT_KEY: string;
     /** 測試用 APNs 驗證金鑰的公鑰(JWK JSON),假 APNs 端點用來驗 provider token。 */
     TEST_APNS_PUBLIC_JWK: string;
+    /** 測試用 App Store Server API 金鑰的公鑰(JWK JSON),假 App Store Server API 用來驗 JWT。 */
+    TEST_APP_STORE_API_PUBLIC_JWK: string;
   }
 }

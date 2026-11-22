@@ -36,7 +36,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `DELETE /v1/members/me/identities/{apple\|google}` | 存取權杖 | 解除連結。回 `{ member }` |
 | `DELETE /v1/members/me` | 存取權杖 | 刪除會員。回 204 |
 | `GET /v1/members/me/subscription` | 存取權杖 | 回 `{ subscription }`;從沒訂閱過是 `null` |
-| `POST /v1/members/me/subscription/app-store` | 存取權杖 | 提交 StoreKit 2 交易。body `{ signedTransaction }`(`VerificationResult.jwsRepresentation`)。回 `{ subscription }` |
+| `POST /v1/members/me/subscription/app-store` | 存取權杖 | 提交 StoreKit 2 交易。body `{ signedTransaction }`(`VerificationResult.jwsRepresentation`)。回 `{ subscription }`;訂閱屬於其他會員回 409 `subscription_in_use`,帶 `error.details`,見下方「訂閱綁定與 App Store 串接」 |
 | `POST /v1/members/me/hosts/sync` | 存取權杖 | 主機同步(要有效的 Purrdr Plus)。body `{ changes: [...] }`,回 `{ hosts: [...], deletedHostIds: [...] }`,見下方「主機同步」 |
 | `POST /v1/members/me/push-pairings` | 存取權杖 | 註冊推播配對(需要有效訂閱)。body `{ keyHash, platform: "apns", deviceToken, environment: "production"\|"sandbox", deviceId?, deviceName?, model?, kinds? }`;`kinds` 是要收的推播種類(`blocked`、`done`、`stuck`、`reminder`、`host_service` 的陣列),新配對沒帶時只收 `blocked`。同一個 `keyHash` 再送一次是更新(APNs token 輪替、改偏好;沒帶 `kinds` 保留原本的偏好)。裝置欄位見下方「通知裝置」。回 201 |
 | `DELETE /v1/members/me/push-pairings/{keyHash}` | 存取權杖 | 撤銷推播配對(只刪自己的、不存在也算成功、不需要訂閱)。回 204 |
@@ -91,7 +91,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 404 | `identity_not_linked` | 解除沒有連結的登入方式 |
 | 409 | `provider_already_linked` | 連結時已經有同一種登入方式(每種最多一個) |
 | 400 | `invalid_transaction` | 交易簽章驗不過，或不是這個 app、不是 Purrdr Plus、環境不是 Production／Sandbox(StoreKit 設定檔的交易一律驗不過) |
-| 400 | `invalid_notification` | App Store 通知簽章驗不過，或 bundle id、環境、app Apple ID 不對 |
+| 400 | `invalid_notification` | App Store 通知簽章驗不過，或 bundle id、環境(`data.environment` 與交易的 `environment` 不一致也算)、app Apple ID 不對 |
 | 403 | `subscription_required` | 需要有效的 Purrdr Plus(主機同步、註冊推播配對、送推播) |
 | 404 | `pairing_not_found` | 送推播的配對密鑰沒有註冊(或已撤銷) |
 | 409 | `pairing_in_use` | 這個配對密鑰雜湊已屬於另一個會員 |
@@ -102,11 +102,37 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 409 | `merge_required` | 連結時身分屬於另一個會員;`error.details` 是合併摘要,確認後改呼叫 `POST /v1/members/me/identities/merge` |
 | 409 | `subscription_conflict` | 確認合併時兩邊都有有效訂閱(一個會員只能有一個);什麼都沒動,要先讓其中一邊不再有效 |
 | 409 | `no_merge_needed` | 確認合併時身分沒有屬於任何會員,或本來就是自己的 |
-| 409 | `subscription_in_use` | 這個 App Store 訂閱已屬於另一個會員 |
+| 409 | `subscription_in_use` | 這個 App Store 訂閱已屬於另一個會員;`error.details` 是 `{ ownerEmail, canTransfer }`(見「訂閱綁定與 App Store 串接」) |
 | 409 | `subscription_already_active` | 這個會員已有另一個有效訂閱(一個會員同時最多一個:有效 = 生效中、帳單寬限期、帳單重試期);換訂閱要等原訂閱不再有效 |
 | 409 | `last_identity` | 解除最後一種登入方式 |
 | 502 | `provider_unavailable` | 連不上 Apple／Google |
 | 502 | `apple_revoke_failed` | 刪除會員時撤銷 Sign in with Apple 權杖失敗;資料沒有刪，請稍後重試 |
+
+### 訂閱綁定與 App Store 串接(#25)
+
+**屬於其他會員**:提交的交易(或其 `appAccountToken`)屬於另一個會員時回
+`409 { error: { code: "subscription_in_use", message, details: { ownerEmail, canTransfer } } }`。
+`ownerEmail` 是擁有者任一登入身分的遮蔽 email(`maskEmail`,例如 `r***@example.com`;擁有者沒有 email 時是 `null`),不回對方的會員 ID。
+`canTransfer` 是提交的會員自己沒有佔著有效訂閱名額(生效中、帳單寬限期、帳單重試期;一會員一訂閱),供訂閱轉移(#27)判斷;轉移本身不在 #25。
+
+**事件稽核**(`subscription_events`):app 提交的交易記 `client` / `transaction_submitted`;通知記 `store_notification`,`type` 是
+`<notificationType>` 或 `<notificationType>.<subtype>`,`notification_uuid` 唯一。
+
+**通知冪等**:同一個 `notificationUUID` 已處理過就直接回 200,不重複處理(Apple 失敗時會重送;Sandbox 只送一次)。
+**狀態轉換**:依通知 `data.status`(1 active、2 expired、3 billing retry、4 grace、5 revoked)寫入 `subscriptions.status`:
+`active`、`expired`、`billing_retry`、`grace`、`revoked`;REFUND(交易帶 `revocationDate`)記 `refunded`。`GRACE_PERIOD_EXPIRED` 的 status 是 3,對應
+`billing_retry`(寬限期結束、Apple 仍在重試)。通知沒帶 `data.status` 時才依通知類型推算。`grace` 之外的狀態都沒有 Plus 權限(`billing_retry` 沒有權限,
+但仍佔著一會員一訂閱的名額;會員重新購買另一個訂閱時,已過期的重試中訂閱讓位成 `expired`)。Production 與 Sandbox 通知用同一個網址,依 `data.environment` 區分,
+且必須與交易的 `environment` 一致。不認得的訂閱(沒登記、`appAccountToken` 也不是現有會員)略過、回 200,不記事件(事件要掛在訂閱底下)。
+
+**App Store Server API 查證**(`src/app-store-api.ts`):綁定時後台用 ES256 JWT(`kid` = `APP_STORE_API_KEY_ID`、`iss` = `APP_STORE_API_ISSUER_ID`、
+`aud` = `appstoreconnect-v1`、`bid` = bundle id、有效 5 分鐘)呼叫 `GET /inApps/v1/subscriptions/{originalTransactionId}`(Get All Subscription Statuses),
+主機依交易環境選:Production `api.storekit.apple.com`、Sandbox `api.storekit-sandbox.apple.com`。
+- 查得到:以 Apple 回報的最新交易、續訂資訊與狀態為準,記 `store_api` / `status_checked`。
+- **查不到或 Apple 不可達都不擋購買**:提交的簽章交易本身已驗過 Apple 憑證鏈,所以以簽章交易為準。Apple 查無此訂閱(404)記 `lookup_not_found`;
+  沒設定金鑰、連不上、逾時(5 秒)、429、5xx、或 JWT 被拒(401,查 secret 與 Key ID／Issuer ID)記 `lookup_unreachable`。之後的通知或下一次提交會補上 Apple 的狀態。
+- `setAppAccountToken(env, originalTransactionId, memberId, environment)`(`PUT /inApps/v1/transactions/{id}/appAccountToken`)已備好給 #27 的訂閱轉移,
+  **目前沒有任何 API 呼叫它**。Apple 拒絕丟 `AppStoreApiError`(帶 `errorCode`),暫時不可用丟 `AppStoreApiUnavailable`(可重試)。
 
 ### 規則
 
@@ -213,7 +239,9 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | App 的 Apple ID | `wrangler.jsonc` 的 `APP_STORE_APP_APPLE_ID`,以及 app 的 `PurrdrLinks.appStoreID`(`src/PurrdrFeatures/PlusView.swift`) | 已填 `6835416115`(App Store Connect → App 資訊 → Apple ID);兩處要相同 |
 | Purrdr Plus 商品 | App Store Connect → 訂閱 | 訂閱群組「Purrdr Plus」,商品 `com.raychiu.purrdr.plus.monthly`(1 個月)、`com.raychiu.purrdr.plus.yearly`(1 年),兩者都有 2 週免費試用(新訂閱者)。價格、顯示名稱與說明要跟 app repo 的 `src/App/Purrdr.storekit` 的意思一致(設定檔的價格只是測試用)。ID 改了要同步 `src/subscriptions.ts` 的 `PLUS_PRODUCT_IDS` 與 app 的 `MemberSubscription.productIDs` |
 | Offer Code | App Store Connect → 訂閱 → 優惠代碼 | 送朋友與活動用;不用自訂授權碼(審查規範 3.1.1) |
-| App Store Server Notifications | App Store Connect → App 資訊 → App Store 伺服器通知 | Production 與 Sandbox 都填 `https://<後台網址>/v1/app-store/notifications`,版本選 **Version 2**;填好後可用 App Store Server API 的「Request a Test Notification」確認(回 TEST 通知) |
+| App Store Server Notifications | App Store Connect → App 資訊 → App Store 伺服器通知 | 兩個環境各設一次(Apple 允許同一個網址,後台依 `data.environment` 區分):App Store Connect → 我的 App → App 資訊 → App Store 伺服器通知,<br>1. **Production 伺服器網址**填 `https://<後台網址>/v1/app-store/notifications`,版本選 **Version 2**;<br>2. **Sandbox 伺服器網址**填同一個網址,版本選 **Version 2**;<br>3. 填好後用 App Store Server API 的「Request a Test Notification」確認(回 TEST 通知,後台回 200)。通知來源 IP 是 `17.0.0.0/8`;後台回 200 才算收到,非 2xx 時 Production 會重送(Sandbox 不重送) |
+| App Store Server API 金鑰 Key ID 與 Issuer ID | `wrangler.jsonc` 的 `APP_STORE_API_KEY_ID`、`APP_STORE_API_ISSUER_ID`(目前是 `REPLACE_ME`) | App Store Connect → 使用者與存取權限 → 整合 → App 內購買項目 → 產生金鑰;Key ID 在金鑰列表、Issuer ID 在頁面上方。不是 secret,可進 repo(公開 repo 只放識別碼) |
+| App Store Server API 私鑰 | secret `APP_STORE_API_KEY` | 上一步下載的 `.p8` 全文(只能下載一次):`npx wrangler secret put APP_STORE_API_KEY < SubscriptionKey_XXXX.p8`。這把是 In-App Purchase 金鑰,跟 APNs、Sign in with Apple 的金鑰不同;列在 `secrets.required`,沒設定 wrangler 不會讓你部署;萬一缺或失效,綁定不查證(記 `lookup_unreachable`),不影響購買 |
 | APNs 驗證金鑰 Key ID | `wrangler.jsonc` 的 `APNS_KEY_ID` | Apple Developer → Keys,建立啟用 Apple Push Notifications service (APNs) 的金鑰(環境選 Sandbox & Production);Team ID 沿用 `APPLE_TEAM_ID` |
 | APNs 私鑰 | secret `APNS_PRIVATE_KEY` | 上一步下載的 `.p8` 全文:`npx wrangler secret put APNS_PRIVATE_KEY < AuthKey_XXXX.p8` |
 | App ID 開推播 | Apple Developer → Identifiers | `com.raychiu.purrdr` 勾選 Push Notifications 與 Time Sensitive Notifications(app 的 entitlement 已加 `aps-environment` 與 time-sensitive) |
@@ -226,4 +254,4 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 會員開啟主機同步時，另保存每台主機的名稱、位址與埠、使用者名稱、連線方式(Tailscale SSH／OpenSSH／HTTPS)、host key 指紋、HTTPS 主機的主機服務位址與修改時間，
 以及已刪除主機的 id 與刪除時間;後台可讀(TLS 傳輸、Cloudflare 靜態加密，不做端對端加密)。私鑰、密碼、passphrase、裝置權杖永不上傳。刪除會員時一併刪除。
 
-沒有使用 App Store Server API,所以不需要 In-App Purchase key(`.p8`):權限只靠 app 提交的簽章交易與 App Store Server Notifications。之後若要主動查狀態或補抓漏掉的通知(Get All Subscription Statuses、Get Notification History),再新增金鑰與 secret。
+使用 App Store Server API(綁定時查證、之後訂閱轉移改 appAccountToken),需要 In-App Purchase 金鑰(`.p8`):識別碼放 `wrangler.jsonc`,私鑰只放 secret `APP_STORE_API_KEY`,不進 repo。這把金鑰沒有設定時,權限仍靠 app 提交的簽章交易與 App Store Server Notifications。

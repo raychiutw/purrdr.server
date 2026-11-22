@@ -34,12 +34,17 @@
     // App Store Connect 的 Apple ID(數字，與 app 的 PurrdrLinks.appStoreID 相同);只檢查 Production 環境的通知。
     "APP_STORE_APP_APPLE_ID": "6835416115",
     // APNs 驗證金鑰(.p8)的 Key ID(推播轉送，#29)。Team ID 沿用 APPLE_TEAM_ID,topic 是 APPLE_CLIENT_ID(bundle id)。
-    "APNS_KEY_ID": "663SWUGMD9"
+    "APNS_KEY_ID": "663SWUGMD9",
+    // App Store Server API 的 In-App Purchase 金鑰(.p8)的 Key ID 與 Issuer ID(#25;App Store Connect → 使用者與存取權限 → 整合 → App 內購買項目)。
+    // 兩者都只是識別碼,單獨拿到不能做任何事。上線前換成真值,見 README「上線前要填的東西」。
+    "APP_STORE_API_KEY_ID": "REPLACE_ME",
+    "APP_STORE_API_ISSUER_ID": "REPLACE_ME"
   },
   // Secrets:值不寫在這裡，用 `wrangler secret put <名稱>` 設定。
   //   APPLE_PRIVATE_KEY    Sign in with Apple 私鑰 .p8 的 PEM 全文(PKCS#8)
   //   ACCESS_TOKEN_SECRET  簽存取權杖(HS256)的隨機密鑰，至少 32 bytes
   //   APNS_PRIVATE_KEY     APNs 驗證金鑰 .p8 的 PEM 全文(PKCS#8)
   //   APPLE_TOKEN_ENCRYPTION_KEY  加密 Sign in with Apple refresh token 的 AES-GCM 金鑰(base64 的 32 bytes)
-  "secrets": { "required": ["APPLE_PRIVATE_KEY", "ACCESS_TOKEN_SECRET", "APNS_PRIVATE_KEY", "APPLE_TOKEN_ENCRYPTION_KEY"] }
+  //   APP_STORE_API_KEY    App Store Server API 的 In-App Purchase 金鑰 .p8 的 PEM 全文(PKCS#8)
+  "secrets": { "required": ["APPLE_PRIVATE_KEY", "ACCESS_TOKEN_SECRET", "APNS_PRIVATE_KEY", "APPLE_TOKEN_ENCRYPTION_KEY", "APP_STORE_API_KEY"] }
 }

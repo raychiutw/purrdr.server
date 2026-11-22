@@ -92,5 +92,7 @@ export type NotificationPayload = {
     environment?: string;
     signedTransactionInfo?: string;
     signedRenewalInfo?: string;
+    /** Apple 的訂閱狀態(只有自動續訂的通知有):1 active、2 expired、3 billing retry、4 grace period、5 revoked。 */
+    status?: number;
   };
 };

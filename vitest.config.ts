@@ -19,7 +19,11 @@ function testKeys() {
   const p8 = generateKeyPairSync("ec", { namedCurve: "P-256" });
   // APNs 驗證金鑰(.p8)的替身;假 APNs 端點用公鑰驗證 provider token。
   const apns = generateKeyPairSync("ec", { namedCurve: "P-256" });
+  // App Store Server API 的 In-App Purchase 金鑰(.p8)的替身;假 App Store Server API 用公鑰驗 JWT。
+  const appStoreApi = generateKeyPairSync("ec", { namedCurve: "P-256" });
   return {
+    appStoreApiPrivateKey: appStoreApi.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
+    appStoreApiPublicJwk: JSON.stringify(appStoreApi.publicKey.export({ format: "jwk" })),
     appleIdTokenKey: JSON.stringify(rsa()),
     googleIdTokenKey: JSON.stringify(rsa()),
     applePrivateKey: p8.privateKey.export({ format: "pem", type: "pkcs8" }).toString(),
@@ -40,6 +44,7 @@ export default defineConfig({
       process.env.APPLE_PRIVATE_KEY = keys.applePrivateKey;
       process.env.ACCESS_TOKEN_SECRET = accessTokenSecret;
       process.env.APNS_PRIVATE_KEY = keys.apnsPrivateKey;
+      process.env.APP_STORE_API_KEY = keys.appStoreApiPrivateKey;
       process.env.APPLE_TOKEN_ENCRYPTION_KEY = appleTokenEncryptionKey;
       return {
         wrangler: { configPath: "./wrangler.jsonc" },
@@ -60,6 +65,10 @@ export default defineConfig({
             APNS_KEY_ID: "TESTAPNS12",
             APNS_PRIVATE_KEY: keys.apnsPrivateKey,
             TEST_APNS_PUBLIC_JWK: keys.apnsPublicJwk,
+            APP_STORE_API_KEY_ID: "TESTAPI123",
+            APP_STORE_API_ISSUER_ID: "11111111-2222-3333-4444-555555555555",
+            APP_STORE_API_KEY: keys.appStoreApiPrivateKey,
+            TEST_APP_STORE_API_PUBLIC_JWK: keys.appStoreApiPublicJwk,
           },
         },
       };

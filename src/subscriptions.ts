@@ -5,7 +5,9 @@ import {
   type RenewalInfoPayload,
   type TransactionPayload,
 } from "./app-store";
+import { getSubscriptionStatus, AppStoreApiUnavailable, type AppStoreEnvironment } from "./app-store-api";
 import { ApiError } from "./http";
+import { maskEmail } from "./mask-email";
 
 /// 訂閱權限(Purrdr Plus,ADR-0007):權限記在會員身上，記錄來源商店。
 ///
@@ -31,7 +33,11 @@ export type SubscriptionView = {
   willAutoRenew: boolean | null;
 };
 
+type StoredStatus = "active" | "grace" | "billing_retry" | "expired" | "revoked" | "refunded";
+
 type Row = {
+  status: StoredStatus;
+  pending_review: number;
   store: "app_store" | "google_play";
   member_id: string;
   product_id: string;
@@ -91,6 +97,83 @@ export async function hasActiveSubscription(env: Env, memberId: string, now = Da
 export async function requireActiveSubscription(env: Env, memberId: string, now = Date.now()): Promise<void> {
   if (!(await hasActiveSubscription(env, memberId, now))) {
     throw new ApiError(403, "subscription_required", "This needs an active Purrdr Plus subscription.");
+  }
+}
+
+/// 會員有沒有佔著「一會員一個有效訂閱」的名額:生效中、帳單寬限期、帳單重試期(重試期沒有 Plus 權限,但名額還在)。
+async function holdsLiveSlot(env: Env, memberId: string, now = Date.now()): Promise<boolean> {
+  return (await rowsOf(env, memberId)).some(
+    (row) => row.pending_review === 0 && (isActive(statusOf(row, now)) || (row.status === "billing_retry" && row.revoked_at === null)),
+  );
+}
+
+// MARK: - 訂閱事件(稽核與冪等)
+
+type EventSource = "store_notification" | "store_api" | "client";
+
+/// 記一筆訂閱事件。有 `notificationUUID` 時以它冪等(重複的不再寫);訂閱還沒登記時不記。
+async function recordEvent(env: Env, originalTransactionId: string, source: EventSource, type: string, notificationUUID: string | null = null): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO subscription_events (id, subscription_id, source, type, notification_uuid, received_at)
+     SELECT ?1, id, ?2, ?3, ?4, ?5 FROM subscriptions WHERE store = 'app_store' AND external_id = ?6
+     ON CONFLICT (notification_uuid) DO NOTHING`,
+  )
+    .bind(crypto.randomUUID(), source, type, notificationUUID, Date.now(), originalTransactionId)
+    .run();
+}
+
+async function notificationSeen(env: Env, notificationUUID: string): Promise<boolean> {
+  return (await env.DB.prepare("SELECT 1 AS found FROM subscription_events WHERE notification_uuid = ?").bind(notificationUUID).first()) !== null;
+}
+
+/// Apple 的訂閱狀態(Get All Subscription Statuses 與通知的 `data.status`)對應到我們存的狀態。
+const APPLE_STATUS: Record<number, StoredStatus> = { 1: "active", 2: "expired", 3: "billing_retry", 4: "grace", 5: "revoked" };
+
+/// 這次交易之後訂閱該有的狀態。依 Apple 回報的 status;沒有 status(例如舊格式通知)時依通知類型;都沒有回 null(沿用依時間推算的快照)。
+/// 退款(REFUND,交易帶 `revocationDate`)記成 refunded,其他撤銷是 revoked。
+function storeStatusOf(
+  appleStatus: number | undefined,
+  transaction: TransactionPayload,
+  notificationType?: string,
+  subtype?: string,
+): StoredStatus | null {
+  if (notificationType === "REFUND" && transaction.revocationDate != null) {
+    return "refunded";
+  }
+  if (appleStatus !== undefined) {
+    return APPLE_STATUS[appleStatus] ?? null;
+  }
+  switch (notificationType) {
+    case "GRACE_PERIOD_EXPIRED":
+      return "billing_retry";
+    case "DID_FAIL_TO_RENEW":
+      return subtype === "GRACE_PERIOD" ? "grace" : "billing_retry";
+    case "EXPIRED":
+      return "expired";
+    case "REVOKE":
+      return "revoked";
+    default:
+      return null;
+  }
+}
+
+/// 把狀態寫到這筆交易對應的訂閱(只有這筆交易確實是目前記錄的版本時才寫,晚到的舊資料不會覆蓋)。
+/// 會員另有佔名額的訂閱時(唯一索引擋下),保留依時間推算的快照。
+async function applyStatus(env: Env, transaction: TransactionPayload, status: StoredStatus | null): Promise<void> {
+  if (status === null) {
+    return;
+  }
+  try {
+    await env.DB.prepare(
+      `UPDATE subscriptions SET status = ?1, updated_at = ?2
+       WHERE store = 'app_store' AND external_id = ?3 AND current_transaction_id = ?4 AND transaction_signed_at = ?5`,
+    )
+      .bind(status, Date.now(), transaction.originalTransactionId, transaction.transactionId, transaction.signedDate)
+      .run();
+  } catch (error) {
+    if (!(error instanceof Error && ONE_LIVE_SUBSCRIPTION.test(error.message))) {
+      throw error;
+    }
   }
 }
 
@@ -211,14 +294,63 @@ export async function submitAppStoreTransaction(env: Env, memberId: string, sign
   const transaction = await verifiedTransaction(env, signedTransaction);
   const owner = await ownerOf(env, transaction.originalTransactionId);
   const token = transaction.appAccountToken?.toLowerCase();
-  if (
-    (owner !== null && owner !== memberId) ||
-    (owner === null && token !== undefined && token !== memberId && (await memberExists(env, token)))
-  ) {
-    throw new ApiError(409, "subscription_in_use", "This App Store subscription belongs to another Purrdr member.");
+  const claimedBy = owner ?? (token !== undefined && token !== memberId && (await memberExists(env, token)) ? token : null);
+  if (claimedBy !== null && claimedBy !== memberId) {
+    throw new ApiError(409, "subscription_in_use", "This App Store subscription belongs to another Purrdr member.", {}, await ownerDetails(env, claimedBy, memberId));
   }
   await applyTransaction(env, memberId, transaction);
+  await recordEvent(env, transaction.originalTransactionId, "client", "transaction_submitted");
+  await verifyWithApple(env, transaction);
   return subscriptionView(env, memberId);
+}
+
+/// 「屬於其他會員」回應的 `error.details`,給 app 顯示與 #27 的轉移用:
+/// `ownerEmail` 是擁有者任一身分的遮蔽 email(沒有就是 null),不回會員 ID;
+/// `canTransfer` 是提交的會員自己沒有佔著有效訂閱名額(一會員一訂閱,有的話轉移會被擋下)。
+async function ownerDetails(env: Env, ownerId: string, requesterId: string): Promise<{ ownerEmail: string | null; canTransfer: boolean }> {
+  const { results } = await env.DB.prepare("SELECT email FROM identities WHERE member_id = ? AND email IS NOT NULL ORDER BY linked_at, provider")
+    .bind(ownerId)
+    .all<{ email: string }>();
+  const masked = results.map((row) => maskEmail(row.email)).find((email) => email !== null) ?? null;
+  return { ownerEmail: masked, canTransfer: !(await holdsLiveSlot(env, requesterId)) };
+}
+
+/// 綁定後向 App Store Server API 查證(Get All Subscription Statuses)。
+///
+/// 提交的簽章交易本身已驗過 Apple 的憑證鏈,所以 Apple 查不到或連不上都**不擋購買**,以簽章交易為準,記一筆事件:
+/// `lookup_not_found`(Apple 查無此訂閱)、`lookup_unreachable`(沒設定金鑰、連不上、逾時、Apple 5xx 或 429)。
+/// 查到時以 Apple 回報的最新交易、續訂資訊與狀態為準(例如 Apple 說已進入 billing retry),記 `status_checked`。
+/// 這個函式不丟例外。
+async function verifyWithApple(env: Env, submitted: TransactionPayload): Promise<void> {
+  const environment: AppStoreEnvironment = submitted.environment === "Production" ? "Production" : "Sandbox";
+  const id = submitted.originalTransactionId;
+  try {
+    const result = await getSubscriptionStatus(env, id, environment);
+    if (result === null) {
+      await recordEvent(env, id, "store_api", "lookup_not_found");
+      return;
+    }
+    const latest = await verifiedTransaction(env, result.signedTransactionInfo);
+    if (latest.originalTransactionId !== id) {
+      throw new AppStoreApiUnavailable("mismatched transaction");
+    }
+    const owner = await ownerOf(env, id);
+    if (owner === null) {
+      return;
+    }
+    await applyTransaction(env, owner, latest);
+    if (result.signedRenewalInfo) {
+      await applyRenewalInfo(env, result.signedRenewalInfo, id);
+    }
+    await applyStatus(env, latest, storeStatusOf(result.status, latest));
+    await recordEvent(env, id, "store_api", "status_checked");
+  } catch (error) {
+    if (error instanceof ApiError || error instanceof AppStoreApiUnavailable) {
+      await recordEvent(env, id, "store_api", "lookup_unreachable");
+      return;
+    }
+    throw error;
+  }
 }
 
 // MARK: - App Store Server Notifications v2
@@ -229,7 +361,8 @@ function invalidNotification(reason: string): ApiError {
 
 /// POST /v1/app-store/notifications:驗證後依通知裡的交易與續訂資訊更新權限。
 ///
-/// 不依通知類型個別處理：續訂(DID_RENEW)帶新的到期時間、到期(EXPIRED)的到期時間已過、
+/// 通知以 `notificationUUID` 冪等(重送直接回 200)並記一筆 `store_notification` 事件。
+/// 交易與續訂資訊的寫入不依通知類型個別處理，訂閱狀態(active、grace、billing_retry、expired、revoked、refunded)依 `data.status`:續訂(DID_RENEW)帶新的到期時間、到期(EXPIRED)的到期時間已過、
 /// 退款(REFUND)與撤銷(REVOKE)帶 `revocationDate`、撤銷被取消(REFUND_REVERSED)不帶，寫入交易就得到正確狀態。
 /// 不認得的訂閱(沒有登記、`appAccountToken` 也不是現有會員)略過。
 export async function handleAppStoreNotification(env: Env, signedPayload: string): Promise<void> {
@@ -246,6 +379,10 @@ export async function handleAppStoreNotification(env: Env, signedPayload: string
   if (!data?.signedTransactionInfo) {
     return;
   } // TEST、摘要類通知沒有交易。
+  const notificationUUID = typeof notification.notificationUUID === "string" ? notification.notificationUUID : null;
+  if (notificationUUID !== null && (await notificationSeen(env, notificationUUID))) {
+    return;
+  } // Apple 重送:已處理過,直接回 200。
   if (data.bundleId !== env.APPLE_CLIENT_ID) {
     throw invalidNotification("bundle id");
   }
@@ -265,6 +402,9 @@ export async function handleAppStoreNotification(env: Env, signedPayload: string
     }
     throw error;
   }
+  if (transaction.environment !== data.environment) {
+    throw invalidNotification("environment");
+  }
   let owner = await ownerOf(env, transaction.originalTransactionId);
   const token = transaction.appAccountToken?.toLowerCase();
   if (owner === null && token !== undefined && (await memberExists(env, token))) {
@@ -278,6 +418,9 @@ export async function handleAppStoreNotification(env: Env, signedPayload: string
   if (data.signedRenewalInfo) {
     await applyRenewalInfo(env, data.signedRenewalInfo, transaction.originalTransactionId);
   }
+  await applyStatus(env, transaction, storeStatusOf(data.status, transaction, notification.notificationType, notification.subtype));
+  const type = notification.subtype ? `${notification.notificationType}.${notification.subtype}` : notification.notificationType;
+  await recordEvent(env, transaction.originalTransactionId, "store_notification", type, notificationUUID);
 }
 
 async function applyRenewalInfo(env: Env, jws: string, originalTransactionId: string): Promise<void> {
