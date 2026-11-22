@@ -25,9 +25,11 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 
 | 方法與路徑 | 權杖 | 說明 |
 |---|---|---|
-| `POST /v1/sessions` | — | 登入。body `{ provider: "apple"\|"google", idToken, nonce, authorizationCode? }`;Apple 必須帶 `authorizationCode`。回 `{ accessToken, accessTokenExpiresAt, refreshToken, memberCreated, autoLinked, member }`;新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email 時歸到那個會員(`autoLinked: true`、`memberCreated: false`),見「規則」的「登入與自動合併」 |
-| `POST /v1/sessions/refresh` | — | body `{ refreshToken }`,換一組新權杖(舊的更新權杖立即失效)。回應同登入，但沒有 `memberCreated` |
+| `POST /v1/sessions` | — | 登入。body `{ provider: "apple"\|"google", idToken, nonce, authorizationCode?, deviceId? }`;Apple 必須帶 `authorizationCode`。`deviceId` 選填,是 app 存在 Keychain 的 UUID(1~64 字元的英數與 `.` `_` `:` `-`,不合 400 `invalid_request`):帶了就以它建立或更新裝置,並撤銷這支裝置舊的工作階段(每裝置一個;換會員登入同理);沒帶(舊 app)維持每次登入建一個裝置。回 `{ accessToken, accessTokenExpiresAt, refreshToken, memberCreated, autoLinked, member }`;新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email 時歸到那個會員(`autoLinked: true`、`memberCreated: false`),見「規則」的「登入與自動合併」 |
+| `POST /v1/sessions/refresh` | — | body `{ refreshToken }`,換一組新權杖。舊的更新權杖有 60 秒寬限:寬限內重送回傳**同一組**新權杖;寬限外再用舊權杖視為外洩,撤銷該工作階段並回 401。回應同登入，但沒有 `memberCreated` |
 | `POST /v1/sessions/revoke` | — | 登出。body `{ refreshToken }`,回 204 |
+| `GET /v1/members/me/sessions` | 存取權杖 | 列出自己未撤銷、未過期的工作階段(每裝置一個)。回 `{ sessions: [{ id, deviceId, deviceName, deviceModel, createdAt, lastActiveAt, expiresAt, current }] }`;`current` 是發出這個存取權杖的工作階段;`deviceName`／`deviceModel` 沒有時為 `null`;時間為 ISO 8601。存取權杖所屬的工作階段已撤銷也回 401 |
+| `DELETE /v1/members/me/sessions/{id}` | 存取權杖 | 撤銷自己另一支裝置的工作階段(app 要求 Face ID 後才呼叫)。回 204;已撤銷的再撤銷也回 204(冪等);`id` 不存在或屬於別的會員 404 `session_not_found`;是目前這個工作階段 409 `cannot_revoke_current_session`(登出用 `POST /v1/sessions/revoke`)。被撤銷那支裝置的更新權杖立即失效,它已發出的存取權杖最多再活 15 分鐘(只有上面兩支工作階段 API 會即時拒絕) |
 | `GET /v1/members/me` | 存取權杖 | 回 `{ member }` |
 | `POST /v1/members/me/identities` | 存取權杖 | 連結另一種登入方式。body 同登入。回 `{ member, mergedMemberId: null }`;身分已屬於另一個會員時**不合併**,回 409 `merge_required`,`error.details` 是合併確認用的摘要(見下方「合併確認」) |
 | `POST /v1/members/me/identities/merge` | 存取權杖 | 確認合併。body 同連結(要重新帶憑證)。回 `{ member, mergedMemberId, accessToken, accessTokenExpiresAt }` |
@@ -50,7 +52,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 沒有或格式不對是 `null`,遮蔽函式在 `src/mask-email.ts`,#25 也用它),不回對方的會員 ID。`hasActiveSubscription` 含帳單寬限期,
 `hostCount` 不含已刪除的主機。`canMerge` 在兩邊都有有效訂閱時是 `false`。使用者確認後呼叫 `POST /v1/members/me/identities/merge`:
 `mergedMemberId` 是被刪除的會員,`member` 是留下的會員;留下的可能是對方,原本的存取權杖屬於被刪的會員(之後 401),
-所以回應附留下會員的新 `accessToken`;更新權杖不變(sessions 一併搬過去)。身分沒有屬於任何會員、或本來就是自己的回 409 `no_merge_needed`。
+所以回應附留下會員的新 `accessToken`;新存取權杖沿用同一個 `sid`;更新權杖不變(sessions 一併搬過去)。存取權杖要帶 `sid`(同工作階段 API),舊版沒帶 `sid` 的存取權杖回 401。身分沒有屬於任何會員、或本來就是自己的回 409 `no_merge_needed`。
 
 `member` 的形狀:`{ id, identities: [{ provider, email, linkedAt }] }`(email 可能是 Apple private relay,也可能是 `null`)。
 
@@ -83,7 +85,9 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 400 | `invalid_request` | body 不是 JSON、缺欄位、provider 不認得 |
 | 401 | `invalid_id_token` | ID token 簽章、iss、aud、exp、nonce 不對，或 Apple 拒絕 authorization code |
 | 401 | `invalid_access_token` | 沒帶、無效、過期，或會員已刪除 |
-| 401 | `invalid_refresh_token` | 更新權杖無效、過期或已用過 → app 要請使用者重新登入 |
+| 401 | `invalid_refresh_token` | 更新權杖無效、過期、工作階段已撤銷,或寬限(60 秒)外重用舊權杖(同時撤銷該工作階段) → app 要請使用者重新登入 |
+| 404 | `session_not_found` | 撤銷工作階段:`id` 不存在或不是自己的 |
+| 409 | `cannot_revoke_current_session` | 撤銷工作階段:不能撤銷目前這個(要登出請用 `POST /v1/sessions/revoke`) |
 | 404 | `identity_not_linked` | 解除沒有連結的登入方式 |
 | 409 | `provider_already_linked` | 連結時已經有同一種登入方式(每種最多一個) |
 | 400 | `invalid_transaction` | 交易簽章驗不過，或不是這個 app、不是 Purrdr Plus、環境不是 Production／Sandbox(StoreKit 設定檔的交易一律驗不過) |
@@ -106,8 +110,15 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 
 ### 規則
 
+- **更新權杖輪替寬限**(purrdr.server#23):輪替是單一 `UPDATE`(換上新雜湊、舊雜湊記到 `previous_refresh_token_hash`、`rotated_at`、`grace_until = 輪替時間 + 60 秒`),發新與作廢是同一筆原子寫入;登入時撤銷舊工作階段、upsert 裝置、新增工作階段在同一個 D1 batch(交易)。
+  - **寬限內重送要回同一組新權杖,但資料庫不能存明文更新權杖**,所以新權杖不是隨機值,而是 `HMAC-SHA256(ACCESS_TOKEN_SECRET, "purrdr-refresh-rotation-v1:" + SHA-256(舊權杖))` 的 base64url。重送時用同一個舊權杖再導一次就得到相同結果,並確認它的雜湊等於目前存的雜湊才回傳。沒有新增 secret、沒有新欄位、沒有任何可還原權杖的密文;只有資料庫(雜湊)或只有舊權杖都導不出新權杖,要同時持有伺服器 secret。取捨:新權杖在給定舊權杖時是確定的,所以保護它靠的是 `ACCESS_TOKEN_SECRET` 保密(它本來就能簽出任何存取權杖);更換這個 secret 會同時讓所有存取權杖與寬限內的重送失效(之後換權杖不受影響)。
+  - 寬限外重送舊權杖 → 撤銷該工作階段(新權杖也失效),回 401 `invalid_refresh_token`。只記得「上一個」權杖,更早的權杖查不到,一律當無效權杖(401,不撤銷)。
+  - 已撤銷或已過期的工作階段,寬限內的舊權杖也換不到。
+  - 登出(`POST /v1/sessions/revoke`)也認寬限內的舊權杖。
+- **裝置與工作階段**:`deviceId` 是 app 產生並存 Keychain 的 UUID,不是秘密,但知道它的人登入自己的帳號會把該裝置列改歸自己並撤銷原本的工作階段;`deviceId` 只會在持有人自己的 `GET .../sessions` 回應裡出現。沒帶 `deviceId` 的舊 app,每次登入產生一個新的裝置列,舊工作階段不會被撤銷(可從別的裝置在列表撤銷)。
+
 - **nonce**:app 每次登入產生隨機 nonce,把原文送來。Sign in with Apple 交給 Apple 的是 nonce 的 SHA-256(小寫 hex),Google 是原文;後台依此比對 ID token 的 `nonce`。
-- **權杖**:存取權杖是 HS256 JWT,15 分鐘;更新權杖 90 天、只存雜湊(`sessions`,每次登入一個工作階段)、用一次就輪替。
+- **權杖**:存取權杖是 HS256 JWT,15 分鐘;更新權杖 90 天、只存雜湊(`sessions`,每支裝置一個未撤銷的工作階段)、用一次就輪替。存取權杖帶 `sid`(工作階段 ID)。
 - **登入與自動合併**(#24):登入的是**新身分**(不屬於任何會員)時,若 token 的 email 已驗證(`email_verified`)、不是 Apple 私密轉寄、且另一個會員有某個身分 `email_verified = 1`、非私密轉寄、email 相同(不分大小寫),就歸到那個會員並新增這個身分(Apple 一樣換 refresh token)。不自動合併:email 沒驗證或沒有、私密轉寄(兩邊任一邊)、符合的會員不只一個(不猜)、符合的會員已有同一提供者的身分(每種最多一個,沿用 `provider_already_linked` 的精神)。這些情形一律建新會員,使用者之後可在帳號頁手動連結。既有身分再次登入不做合併判斷。
 - **連結與確認合併**(ADR-0007、#24,取代舊的「空會員自動併入」):身分屬於另一個會員時一律先回合併摘要(`merge_required`),不直接合併、也不換 Apple authorization code;使用者確認(app 要 Face ID)後才合併。ADR-0007 原文的「對方有訂閱或同步資料就拒絕」改成下列規則,ADR 另行更新:
   - 兩邊都有**有效訂閱**(生效中、帳單寬限期、帳單重試期)→ 409 `subscription_conflict`。

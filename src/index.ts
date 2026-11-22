@@ -17,7 +17,17 @@ import { mergeMembers, mergeSummary } from "./merge";
 import { registerPairing, revokePairing, sendPush } from "./push";
 import { listDevices, renameDevice, revokeDevice } from "./push-devices";
 import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
-import { authenticate, issueTokens, revokeRefreshToken, rotateRefreshToken, signAccessToken } from "./tokens";
+import {
+  authenticate,
+  authenticateSession,
+  issueTokens,
+  listSessions,
+  parseDeviceId,
+  revokeOtherSession,
+  revokeRefreshToken,
+  rotateRefreshToken,
+  signAccessToken,
+} from "./tokens";
 
 /// Purrdr 後台(ADR-0004、ADR-0007)。API 一覽見 README.md。
 export default {
@@ -69,7 +79,17 @@ async function route(request: Request, env: Env): Promise<Response> {
     const memberId = await authenticate(env, request);
     return json({ device: await renameDevice(env, memberId, decodeURIComponent(devicePath[2]!), request, url.searchParams.get("currentDeviceId")) });
   }
+  const sessionPath = /^DELETE \/v1\/members\/me\/sessions\/([^/]+)$/.exec(key);
+  if (sessionPath) {
+    const { memberId, sessionId } = await authenticateSession(env, request);
+    await revokeOtherSession(env, memberId, sessionId, decodeURIComponent(sessionPath[1]!));
+    return new Response(null, { status: 204 });
+  }
   switch (key) {
+    case "GET /v1/members/me/sessions": {
+      const { memberId, sessionId } = await authenticateSession(env, request);
+      return json({ sessions: await listSessions(env, memberId, sessionId) });
+    }
     case "POST /v1/sessions":
       return signIn(request, env);
     case "POST /v1/sessions/refresh": {
@@ -132,9 +152,11 @@ async function verifiedCredential(
 /// POST /v1/sessions:用 Apple 或 Google 登入;沒有會員就建立一個。
 ///
 /// 新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email(不分大小寫)時,歸到那個會員並新增這個身分
-/// (`autoLinked: true`);規則見 `autoMergeTarget`。
+/// (`autoLinked: true`);規則見 `autoMergeTarget`。選填 `deviceId`(app Keychain 的 UUID)。
 async function signIn(request: Request, env: Env): Promise<Response> {
-  const { identity, appleRefreshToken } = await verifiedCredential(env, await readJson(request));
+  const body = await readJson(request);
+  const deviceId = parseDeviceId(body.deviceId);
+  const { identity, appleRefreshToken } = await verifiedCredential(env, body);
   let memberId = await memberIdFor(env, identity);
   let memberCreated = false;
   let autoLinked = false;
@@ -151,18 +173,18 @@ async function signIn(request: Request, env: Env): Promise<Response> {
       autoLinked = true;
     }
   }
-  const tokens = await issueTokens(env, memberId);
+  const tokens = await issueTokens(env, memberId, deviceId);
   return json({ ...tokens, memberCreated, autoLinked, member: await memberView(env, memberId) });
 }
 
 /// 連結與確認合併共用:驗證憑證(不換 Apple authorization code,確定要做才換),回傳這個身分目前屬於誰。
 async function linkingCredential(request: Request, env: Env) {
-  const memberId = await authenticate(env, request);
+  const { memberId, sessionId } = await authenticateSession(env, request);
   const body = await readJson(request);
   const provider = parseProvider(body.provider);
   const identity = await verifyIdToken(env, provider, requireString(body, "idToken"), requireString(body, "nonce"));
   const exchange = async () => (provider === "apple" ? exchangeAuthorizationCode(env, requireString(body, "authorizationCode")) : null);
-  return { memberId, provider, identity, owner: await memberIdFor(env, identity), exchange };
+  return { memberId, sessionId, provider, identity, owner: await memberIdFor(env, identity), exchange };
 }
 
 /// POST /v1/members/me/identities:連結另一種登入方式。
@@ -194,12 +216,12 @@ async function linkIdentity(request: Request, env: Env): Promise<Response> {
 /// 回 `{ member, mergedMemberId, accessToken, accessTokenExpiresAt }`:留下的可能是對方,原本的存取權杖屬於被刪的會員,
 /// 所以回應附留下會員的新存取權杖;更新權杖不變。
 async function confirmMerge(request: Request, env: Env): Promise<Response> {
-  const { memberId, identity, owner, exchange } = await linkingCredential(request, env);
+  const { memberId, sessionId, identity, owner, exchange } = await linkingCredential(request, env);
   if (owner === null || owner === memberId) {
     throw new ApiError(409, "no_merge_needed", "This sign-in method doesn't belong to another member.");
   }
   const { survivorId, mergedMemberId } = await mergeMembers(env, memberId, owner, identity, exchange);
-  return json({ ...(await signAccessToken(env, survivorId)), member: await memberView(env, survivorId), mergedMemberId });
+  return json({ ...(await signAccessToken(env, survivorId, sessionId)), member: await memberView(env, survivorId), mergedMemberId });
 }
 
 /// DELETE /v1/members/me/identities/{provider}:解除連結，至少保留一種登入方式。

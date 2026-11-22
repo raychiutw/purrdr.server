@@ -116,6 +116,8 @@ describe("權杖", () => {
     expect(refreshed.body.member.id).toBe(signIn.body.member.id);
     expect((await api("GET", "/v1/members/me", { accessToken: refreshed.body.accessToken })).status).toBe(200);
 
+    // 60 秒寬限內舊權杖還換得到同一組(見 test/sessions.test.ts);寬限過了才失效。
+    await env.DB.prepare("UPDATE sessions SET grace_until = 0").run();
     const reused = await api("POST", "/v1/sessions/refresh", { body: { refreshToken: signIn.body.refreshToken } });
     expect(reused.status).toBe(401);
     expect(reused.body.error.code).toBe("invalid_refresh_token");
