@@ -16,6 +16,7 @@ import { syncHosts } from "./host-sync";
 import { mergeMembers, mergeSummary } from "./merge";
 import { registerPairing, revokePairing, sendPush } from "./push";
 import { listDevices, renameDevice, revokeDevice } from "./push-devices";
+import { handleGooglePlayNotification, submitGooglePlayPurchase } from "./google-play";
 import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
 import {
   authenticate,
@@ -44,8 +45,8 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-/// App Store 通知來自 Apple 的伺服器(IP 共用且被擋會延後訂閱狀態),而且要驗簽章，不限流。
-const RATE_LIMIT_EXEMPT = new Set(["POST /v1/app-store/notifications"]);
+/// App Store 通知來自 Apple 的伺服器、Google Play 通知來自 Pub/Sub(IP 共用且被擋會延後訂閱狀態),而且都要驗簽章或 OIDC token，不限流。
+const RATE_LIMIT_EXEMPT = new Set(["POST /v1/app-store/notifications", "POST /v1/google-play/notifications"]);
 const RATE_LIMIT_PERIOD_SECONDS = 60;
 
 /// 每個 IP 60 秒最多 60 次(#2)。沒有 `CF-Connecting-IP` 只會是本機(Cloudflare 一律會帶),不限流。
@@ -118,10 +119,18 @@ async function route(request: Request, env: Env): Promise<Response> {
       const signedTransaction = requireString(await readJson(request), "signedTransaction");
       return json({ subscription: await submitAppStoreTransaction(env, memberId, signedTransaction) });
     }
+    case "POST /v1/members/me/subscription/google-play": {
+      const memberId = await authenticate(env, request);
+      const body = await readJson(request);
+      return json({ subscription: await submitGooglePlayPurchase(env, memberId, requireString(body, "purchaseToken"), requireString(body, "productId")) });
+    }
     case "POST /v1/members/me/hosts/sync":
       return json(await syncHosts(env, await authenticate(env, request), request));
     case "POST /v1/app-store/notifications":
       await handleAppStoreNotification(env, requireString(await readJson(request), "signedPayload"));
+      return json({ received: true });
+    case "POST /v1/google-play/notifications":
+      await handleGooglePlayNotification(env, request);
       return json({ received: true });
     case "POST /v1/members/me/push-pairings":
       await registerPairing(env, await authenticate(env, request), request);

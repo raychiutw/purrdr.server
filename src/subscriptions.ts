@@ -33,7 +33,7 @@ export type SubscriptionView = {
   willAutoRenew: boolean | null;
 };
 
-type StoredStatus = "active" | "grace" | "billing_retry" | "expired" | "revoked" | "refunded";
+export type StoredStatus = "active" | "grace" | "billing_retry" | "expired" | "revoked" | "refunded";
 
 type Row = {
   status: StoredStatus;
@@ -101,7 +101,7 @@ export async function requireActiveSubscription(env: Env, memberId: string, now 
 }
 
 /// 會員有沒有佔著「一會員一個有效訂閱」的名額:生效中、帳單寬限期、帳單重試期(重試期沒有 Plus 權限,但名額還在)。
-async function holdsLiveSlot(env: Env, memberId: string, now = Date.now()): Promise<boolean> {
+export async function holdsLiveSlot(env: Env, memberId: string, now = Date.now()): Promise<boolean> {
   return (await rowsOf(env, memberId)).some(
     (row) => row.pending_review === 0 && (isActive(statusOf(row, now)) || (row.status === "billing_retry" && row.revoked_at === null)),
   );
@@ -109,20 +109,32 @@ async function holdsLiveSlot(env: Env, memberId: string, now = Date.now()): Prom
 
 // MARK: - 訂閱事件(稽核與冪等)
 
-type EventSource = "store_notification" | "store_api" | "client";
+export type EventSource = "store_notification" | "store_api" | "client";
 
 /// 記一筆訂閱事件。有 `notificationUUID` 時以它冪等(重複的不再寫);訂閱還沒登記時不記。
 async function recordEvent(env: Env, originalTransactionId: string, source: EventSource, type: string, notificationUUID: string | null = null): Promise<void> {
+  await recordStoreEvent(env, "app_store", originalTransactionId, source, type, notificationUUID);
+}
+
+/// 同 `recordEvent`,任一商店用(`externalId` 是 App Store 的 original transaction ID 或 Google Play 的 purchase token)。
+export async function recordStoreEvent(
+  env: Env,
+  store: "app_store" | "google_play",
+  externalId: string,
+  source: EventSource,
+  type: string,
+  notificationUUID: string | null = null,
+): Promise<void> {
   await env.DB.prepare(
     `INSERT INTO subscription_events (id, subscription_id, source, type, notification_uuid, received_at)
-     SELECT ?1, id, ?2, ?3, ?4, ?5 FROM subscriptions WHERE store = 'app_store' AND external_id = ?6
+     SELECT ?1, id, ?2, ?3, ?4, ?5 FROM subscriptions WHERE store = ?7 AND external_id = ?6
      ON CONFLICT (notification_uuid) DO NOTHING`,
   )
-    .bind(crypto.randomUUID(), source, type, notificationUUID, Date.now(), originalTransactionId)
+    .bind(crypto.randomUUID(), source, type, notificationUUID, Date.now(), externalId, store)
     .run();
 }
 
-async function notificationSeen(env: Env, notificationUUID: string): Promise<boolean> {
+export async function notificationSeen(env: Env, notificationUUID: string): Promise<boolean> {
   return (await env.DB.prepare("SELECT 1 AS found FROM subscription_events WHERE notification_uuid = ?").bind(notificationUUID).first()) !== null;
 }
 
@@ -221,12 +233,12 @@ async function ownerOf(env: Env, originalTransactionId: string): Promise<string 
   return row?.member_id ?? null;
 }
 
-async function memberExists(env: Env, memberId: string): Promise<boolean> {
+export async function memberExists(env: Env, memberId: string): Promise<boolean> {
   return (await env.DB.prepare("SELECT 1 AS found FROM members WHERE id = ?").bind(memberId).first()) !== null;
 }
 
 /// 一個會員同時最多一個有效訂閱(subscriptions 的部分唯一索引)。
-const ONE_LIVE_SUBSCRIPTION = /UNIQUE constraint failed: subscriptions\.member_id/;
+export const ONE_LIVE_SUBSCRIPTION = /UNIQUE constraint failed: subscriptions\.member_id/;
 
 /// 寫入交易：較晚購買的交易(續訂、升降級)取代舊的;同一筆交易只接受簽章時間不早於現有的(退款、撤銷、撤銷被取消)。
 /// 晚到的舊交易不會蓋掉新狀態。
@@ -307,7 +319,7 @@ export async function submitAppStoreTransaction(env: Env, memberId: string, sign
 /// 「屬於其他會員」回應的 `error.details`,給 app 顯示與 #27 的轉移用:
 /// `ownerEmail` 是擁有者任一身分的遮蔽 email(沒有就是 null),不回會員 ID;
 /// `canTransfer` 是提交的會員自己沒有佔著有效訂閱名額(一會員一訂閱,有的話轉移會被擋下)。
-async function ownerDetails(env: Env, ownerId: string, requesterId: string): Promise<{ ownerEmail: string | null; canTransfer: boolean }> {
+export async function ownerDetails(env: Env, ownerId: string, requesterId: string): Promise<{ ownerEmail: string | null; canTransfer: boolean }> {
   const { results } = await env.DB.prepare("SELECT email FROM identities WHERE member_id = ? AND email IS NOT NULL ORDER BY linked_at, provider")
     .bind(ownerId)
     .all<{ email: string }>();

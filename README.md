@@ -15,7 +15,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 
 - 測試對 Worker 送真正的 HTTP 請求(`exports.default.fetch`),看回應與 D1 狀態;D1 套用 `migrations/` 的正式 migration。
 - **不用任何真金鑰**:`vitest.config.ts` 每次執行都重新產生測試金鑰(Apple／Google 簽 ID token 的 RSA 金鑰、取代 `.p8` 的 P-256 金鑰、存取權杖密鑰)。
-- 對外請求(Apple／Google 的 JWKS、Apple 的 token 與 revoke 端點、APNs)由 `test/fakes.ts` 換掉 global `fetch` 接手;沒預期的對外請求直接丟錯。假 Apple token 端點會驗證後台簽的 client secret(kid、iss、sub、aud、ES256 簽章);假 APNs 端點(`api.push.apple.com`、`api.sandbox.push.apple.com` 的 `/3/device/<token>`)驗證 provider token、記錄 header 與 payload,回應可由測試指定(`apnsReplies`)。
+- 對外請求(Apple／Google 的 JWKS、Google Play 的 OAuth token 與 Developer API(`test/google-play.ts` 組 `SubscriptionPurchaseV2` 與 RTDN,Pub/Sub 的 OIDC token 由假的 Google JWKS 簽)、Apple 的 token 與 revoke 端點、APNs)由 `test/fakes.ts` 換掉 global `fetch` 接手;沒預期的對外請求直接丟錯。假 Apple token 端點會驗證後台簽的 client secret(kid、iss、sub、aud、ES256 簽章);假 APNs 端點(`api.push.apple.com`、`api.sandbox.push.apple.com` 的 `/3/device/<token>`)驗證 provider token、記錄 header 與 payload,回應可由測試指定(`apnsReplies`)。
 - **App Store 簽章用自建憑證鏈**:`vitest.config.ts` 每次產生一張測試根憑證(P-384,取代 Apple Root CA - G3),以 `APPLE_ROOT_CERTIFICATES` 交給後台信任;`test/app-store.ts` 用它簽中繼(帶 Apple WWDR OID)與葉憑證(帶 App Store 收據簽章 OID),再簽交易、續訂資訊與通知。`test/certificates.ts` 是只用 WebCrypto 的 X.509 產生器，可以做出各種壞掉的鏈(不受信任的根、少 OID、過期、簽發者不符)。後台程式不知道是測試，換成 Apple 的根憑證就是正式驗證。
 - TDD 紅綠燈紀錄放在 repo 根目錄的 `.tdd-logs/`(不進 git)。
 
@@ -37,6 +37,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `DELETE /v1/members/me` | 存取權杖 | 刪除會員。回 204 |
 | `GET /v1/members/me/subscription` | 存取權杖 | 回 `{ subscription }`;從沒訂閱過是 `null` |
 | `POST /v1/members/me/subscription/app-store` | 存取權杖 | 提交 StoreKit 2 交易。body `{ signedTransaction }`(`VerificationResult.jwsRepresentation`)。回 `{ subscription }`;訂閱屬於其他會員回 409 `subscription_in_use`,帶 `error.details`,見下方「訂閱綁定與 App Store 串接」 |
+| `POST /v1/members/me/subscription/google-play` | 存取權杖 | Android app 提交 Google Play 購買。body `{ purchaseToken, productId }`。後台向 Google 查證後寫入訂閱,回 `{ subscription }`(`store: "google_play"`)。商品不在白名單或 Google 查不到回 400 `invalid_purchase`;Google 連不上回 502 `store_unavailable`;token 屬於其他會員回 409 `subscription_in_use`(同 App Store,帶 `error.details`);會員已有另一個有效訂閱(任一商店)回 409 `subscription_already_active`。見下方「Google Play 串接」 |
 | `POST /v1/members/me/hosts/sync` | 存取權杖 | 主機同步(要有效的 Purrdr Plus)。body `{ changes: [...] }`,回 `{ hosts: [...], deletedHostIds: [...] }`,見下方「主機同步」 |
 | `POST /v1/members/me/push-pairings` | 存取權杖 | 註冊推播配對(需要有效訂閱)。body `{ keyHash, platform: "apns", deviceToken, environment: "production"\|"sandbox", deviceId?, deviceName?, model?, kinds? }`;`kinds` 是要收的推播種類(`blocked`、`done`、`stuck`、`reminder`、`host_service` 的陣列),新配對沒帶時只收 `blocked`。同一個 `keyHash` 再送一次是更新(APNs token 輪替、改偏好;沒帶 `kinds` 保留原本的偏好)。裝置欄位見下方「通知裝置」。回 201 |
 | `DELETE /v1/members/me/push-pairings/{keyHash}` | 存取權杖 | 撤銷推播配對(只刪自己的、不存在也算成功、不需要訂閱)。回 204 |
@@ -45,6 +46,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `DELETE /v1/members/me/push-devices/{deviceId}` | 存取權杖 | 遠端關閉裝置：撤銷它在所有主機的配對(不需要訂閱)。回 204;不是自己的或沒有配對回 404 `device_not_found` |
 | `POST /v1/push` | 配對密鑰 | 主機外掛送「需要你」或「完成」、主機服務送「可能卡住」或「仍在等你」:body 只能有 `{ key, workspace, status: "blocked"\|"done"\|"stuck"\|"reminder", pane? }`。主機服務送事件:body 只能有 `{ key, event: "host_service_update_available"\|"host_service_updated"\|"host_service_update_rolled_back", version? }`(`host_service_updated` 必須帶 `version`)。測試通知(#19,app 帳號頁「傳送測試通知」):body 只能有 `{ key, event: "test", host_name? }`(`host_name` 選填字串，最長 64 字元，控制字元與換行換成空白、頭尾修掉，剩下空的當成沒帶，不是字串或太長 400)。三種形狀互斥;多一個欄位、不認得的 `status`／`event`、`version` 不是語意化版本就 400。回 200 `{ delivered: true }`;種類不在配對的 `kinds` 內，或同一事件與版本 24 小時內送過時不轉 APNs,回 200 `{ delivered: false }`(測試通知不受 `kinds` 與去重影響) |
 | `POST /v1/app-store/notifications` | — | App Store Server Notifications v2 的 webhook。body `{ signedPayload }`,處理完回 200 `{ received: true }` |
+| `POST /v1/google-play/notifications` | Pub/Sub OIDC Bearer token | Google Play real-time developer notifications(Pub/Sub push,wrapped 格式 `{ message: { data, messageId }, subscription }`)。token 驗不過回 401 `invalid_notification`;處理完或略過回 200 `{ received: true }`;暫時查不到 Google 回 503(Pub/Sub 會重送)。不限流 |
 
 **合併確認**(#24):連結時身分屬於另一個會員,回
 `409 { error: { code: "merge_required", message, details: { canMerge, current, other } } }`;`current` 是目前登入的會員、`other` 是擁有該身分的會員,
@@ -92,6 +94,9 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 409 | `provider_already_linked` | 連結時已經有同一種登入方式(每種最多一個) |
 | 400 | `invalid_transaction` | 交易簽章驗不過，或不是這個 app、不是 Purrdr Plus、環境不是 Production／Sandbox(StoreKit 設定檔的交易一律驗不過) |
 | 400 | `invalid_notification` | App Store 通知簽章驗不過，或 bundle id、環境(`data.environment` 與交易的 `environment` 不一致也算)、app Apple ID 不對 |
+| 400 | `invalid_purchase` | Google Play 購買驗不過:商品不在白名單(或與 Google 回的不一致)、Google 查無此 purchase token |
+| 401 | `invalid_notification` | Google Play 通知的 OIDC token 驗不過(簽章、iss、aud、exp、email、email_verified) |
+| 502／503 | `store_unavailable` | 暫時問不到 Google Play(綁定回 502、通知回 503 讓 Pub/Sub 重送):沒設定、金鑰或服務帳戶授權有問題、連不上、逾時、429、5xx |
 | 403 | `subscription_required` | 需要有效的 Purrdr Plus(主機同步、註冊推播配對、送推播) |
 | 404 | `pairing_not_found` | 送推播的配對密鑰沒有註冊(或已撤銷) |
 | 409 | `pairing_in_use` | 這個配對密鑰雜湊已屬於另一個會員 |
@@ -102,7 +107,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 409 | `merge_required` | 連結時身分屬於另一個會員;`error.details` 是合併摘要,確認後改呼叫 `POST /v1/members/me/identities/merge` |
 | 409 | `subscription_conflict` | 確認合併時兩邊都有有效訂閱(一個會員只能有一個);什麼都沒動,要先讓其中一邊不再有效 |
 | 409 | `no_merge_needed` | 確認合併時身分沒有屬於任何會員,或本來就是自己的 |
-| 409 | `subscription_in_use` | 這個 App Store 訂閱已屬於另一個會員;`error.details` 是 `{ ownerEmail, canTransfer }`(見「訂閱綁定與 App Store 串接」) |
+| 409 | `subscription_in_use` | 這個 App Store 或 Google Play 訂閱已屬於另一個會員;`error.details` 是 `{ ownerEmail, canTransfer }`(見「訂閱綁定與 App Store 串接」) |
 | 409 | `subscription_already_active` | 這個會員已有另一個有效訂閱(一個會員同時最多一個:有效 = 生效中、帳單寬限期、帳單重試期);換訂閱要等原訂閱不再有效 |
 | 409 | `last_identity` | 解除最後一種登入方式 |
 | 502 | `provider_unavailable` | 連不上 Apple／Google |
@@ -219,6 +224,53 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 - **回滾**:D1 的 migration 不能 down。套用前先記下目前的 bookmark:`npx wrangler d1 time-travel info purrdr`;出問題用 `npx wrangler d1 time-travel restore purrdr --bookmark=<bookmark>` 還原整個資料庫(保留期間內有效,依 Cloudflare 方案 7 或 30 天),再把 Worker 退回上一版(`npx wrangler rollback`)。還原會丟掉套用後新登入與新訂閱的資料,所以要在 Worker 還沒對外使用新版前決定。
 - **順序**:先套用 migration,再 `npx wrangler deploy`(舊版 Worker 讀不了新表,新版 Worker 讀不了舊表,中間會有一小段空窗;兩步請連續做)。**部署由使用者手動執行**。
 - 測試:`test/migration-0009.test.ts` 先建出 0001~0008 的舊資料庫、塞一份快照(合併、私密轉寄不合併、兩邊都有有效訂閱、寬限期、退款、裝置與配對、重複主機)再套用 0009;`test/schema.test.ts` 驗證各項限制。
+### Google Play 串接(#26)
+
+與 App Store 並列的第二個訂閱來源(`src/google-play.ts`、`src/google-play-api.ts`)。`subscriptions.store = 'google_play'`、`external_id` 是 purchase token(Google 保證全域唯一)。
+`GET /v1/members/me/subscription` 與 Plus 權限判定對兩個商店一視同仁,`store` 欄位回 `google_play` 時 iOS 端顯示「透過 Google Play 訂閱」。
+
+**一會員一訂閱跨商店**:有效 = 生效中、寬限期、重試期(on hold),與 App Store 同一個部分唯一索引。會員已有有效的 App Store 訂閱時綁定 Google Play、或反過來,都回 409 `subscription_already_active`。
+token 已屬於另一個會員回 409 `subscription_in_use`(`details` 同 #25:遮蔽 email 與 `canTransfer`);`linkedPurchaseToken` 的舊 token 屬於別人、或購買時帶的 `obfuscatedAccountId` 是另一個現有會員也一樣。**不實作 Google 的訂閱轉移**。
+
+**Developer API 查證**:服務帳戶 JWT(RS256;`iss` = `GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL`、`scope` = `https://www.googleapis.com/auth/androidpublisher`、`aud` = `https://oauth2.googleapis.com/token`、有效 5 分鐘)
+向 `oauth2.googleapis.com/token` 換 access token(`jwt-bearer`;每次呼叫換一個,不快取),再呼叫 `GET /androidpublisher/v3/applications/{package}/purchases/subscriptionsv2/tokens/{token}`。
+**Google 是這條路徑唯一的購買證明**,所以查不到(400/404/410)回 400 `invalid_purchase`、暫時問不到回 502,都不寫入。purchase token 過期後 60 天就不能再查。
+
+**狀態對應**(`subscriptionState`):
+
+| Google | 我們存的狀態 |
+|---|---|
+| `ACTIVE` | `active`(`expiryTime` 已過則 `expired`) |
+| `CANCELED`(已取消、存取到 `expiryTime`) | `expiryTime` 還沒到 `active`(`auto_renew = 0`),已過 `expired` |
+| `IN_GRACE_PERIOD` | `grace`(保留權限) |
+| `ON_HOLD` | `billing_retry`(沒有權限;重新購買時讓位成 `expired`,同 App Store) |
+| `EXPIRED`、`PAUSED`、`PENDING`、`PENDING_PURCHASE_CANCELED` | `expired`(沒有權限) |
+
+沒有權限的狀態,到期時間會壓到現在以前,免得之後依時間推算又變有效。**撤銷沒有獨立的 `subscriptionState`**(撤銷後 Google 回 `EXPIRED`),只能靠通知:
+`SUBSCRIPTION_REVOKED`(12)記 `revoked`、`voidedPurchaseNotification`(訂閱退款或 chargeback,`productType = 1`)記 `refunded`,兩者都設 `revoked_at`、立刻失去權限,且之後的查證不會復活(`revoked_at` 有值就不再覆寫)。
+
+**acknowledge**:新購買 3 天內沒 acknowledge 會被 Google 自動退款並撤銷。綁定或通知查證後,有權限且 `acknowledgementState` 還是 `PENDING` 就由後台 acknowledge
+(`POST .../purchases/subscriptions/{productId}/tokens/{token}:acknowledge`;文件寫 2025-05-21 起 `subscriptionId` 不是必要,後台仍帶 productId)。失敗不擋綁定,記 `acknowledge_failed` 事件,下一次查證再送。
+
+**linkedPurchaseToken**(升降級、在 app 內重新訂閱):新 token 綁定時,舊 token 的列改成 `expired`,同一會員不會被一會員一訂閱擋下。通知先於 app 提交到達時(`PURCHASED` 帶新 token),依 `linkedPurchaseToken` 找到舊 token 的會員後綁上新 token。
+
+**RTDN**(`POST /v1/google-play/notifications`):
+- 驗 Pub/Sub push 的 OIDC Bearer token:Google 簽章(`googleapis.com/oauth2/v3/certs`)、`iss`(`accounts.google.com`)、`aud` = `GOOGLE_PLAY_PUBSUB_AUDIENCE`、`exp`,且 `email` = `GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`、`email_verified` = true。沒設定一律拒絕。
+- 以 `message.messageId` 冪等(事件的 `notification_uuid` 記成 `gp:<messageId>`,`source = store_notification`,`type` 是通知類型名稱如 `RENEWED`、`REVOKED`、`VOIDED`);處理成功後才記,所以 503 後重送會重新處理。
+- 通知只代表「狀態變了」:收到後重新向 Google 查證再更新。不認得的 token(沒綁過、`linkedPurchaseToken` 也找不到會員)、測試通知、別的 package、一次性商品通知、格式壞掉的訊息都回 200 略過。
+- Google 回 5xx／非 2xx 才會重送(指數退避 100 ms 到 60 秒);後台回 200 即確認。
+
+**設定步驟**(上線前,由人工執行):
+1. Google Cloud:建立(或沿用)專案,啟用 **Google Play Android Developer API**。
+2. 建立呼叫 API 的服務帳戶,下載 JSON 金鑰。email 填 `wrangler.jsonc` 的 `GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL`;金鑰全文 `npx wrangler secret put GOOGLE_PLAY_SERVICE_ACCOUNT_KEY < key.json`(只放 `private_key` 的 PEM 也行)。
+3. Play Console → 使用者與權限 → 邀請這個服務帳戶 email,授權 App 的 **View financial data**(含查詢訂閱與 acknowledge 所需的權限);授權生效可能要幾小時。
+4. `wrangler.jsonc`:`GOOGLE_PLAY_PACKAGE_NAME`(Android package name)、`GOOGLE_PLAY_PRODUCT_IDS`(Play Console 的訂閱商品 ID,逗號分隔;預設與 App Store 同名,不同就改)。
+5. RTDN:Google Cloud Pub/Sub 建 topic,把 `google-play-developer-notifications@system.gserviceaccount.com` 設為該 topic 的 **Pub/Sub Publisher**。
+6. 建 **push subscription**:endpoint `https://<後台網址>/v1/google-play/notifications`、啟用 authentication(OIDC),選一個服務帳戶(它的 email 填 `GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`)、**audience 填同一個通知網址**(同時填 `GOOGLE_PLAY_PUBSUB_AUDIENCE`)。Pub/Sub 服務代理(`service-<專案編號>@gcp-sa-pubsub.iam.gserviceaccount.com`)要有該服務帳戶的 **Service Account Token Creator** 角色。使用 wrapped 格式(預設)。
+7. Play Console → 營利 → 營利設定 → Real-time developer notifications:填 topic 名稱 `projects/<專案>/topics/<topic>`,選「訂閱與撤銷」類通知,按 **Send test message** 確認後台回 200。
+8. 新 secret 與 vars 清單:secret `GOOGLE_PLAY_SERVICE_ACCOUNT_KEY`(列在 `secrets.required`);vars `GOOGLE_PLAY_PACKAGE_NAME`、`GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PRODUCT_IDS`、`GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PUBSUB_AUDIENCE`(識別碼,可進 repo;目前除商品 ID 外是 `REPLACE_ME`)。
+Android app 購買時要把會員 ID 放進 `obfuscatedAccountId`(對應 App Store 的 `appAccountToken`),後台用它擋下被別人領走的購買。
+
 
 ## 上線前要填的東西
 
@@ -241,6 +293,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | Offer Code | App Store Connect → 訂閱 → 優惠代碼 | 送朋友與活動用;不用自訂授權碼(審查規範 3.1.1) |
 | App Store Server Notifications | App Store Connect → App 資訊 → App Store 伺服器通知 | 兩個環境各設一次(Apple 允許同一個網址,後台依 `data.environment` 區分):App Store Connect → 我的 App → App 資訊 → App Store 伺服器通知,<br>1. **Production 伺服器網址**填 `https://<後台網址>/v1/app-store/notifications`,版本選 **Version 2**;<br>2. **Sandbox 伺服器網址**填同一個網址,版本選 **Version 2**;<br>3. 填好後用 App Store Server API 的「Request a Test Notification」確認(回 TEST 通知,後台回 200)。通知來源 IP 是 `17.0.0.0/8`;後台回 200 才算收到,非 2xx 時 Production 會重送(Sandbox 不重送) |
 | App Store Server API 金鑰 Key ID 與 Issuer ID | `wrangler.jsonc` 的 `APP_STORE_API_KEY_ID`、`APP_STORE_API_ISSUER_ID`(目前是 `REPLACE_ME`) | App Store Connect → 使用者與存取權限 → 整合 → App 內購買項目 → 產生金鑰;Key ID 在金鑰列表、Issuer ID 在頁面上方。不是 secret,可進 repo(公開 repo 只放識別碼) |
+| Google Play 串接 | `wrangler.jsonc` 的 `GOOGLE_PLAY_*` 與 secret `GOOGLE_PLAY_SERVICE_ACCOUNT_KEY` | 步驟見「Google Play 串接」的設定步驟;金鑰沒設定時綁定回 502 `store_unavailable`、通知回 503 |
 | App Store Server API 私鑰 | secret `APP_STORE_API_KEY` | 上一步下載的 `.p8` 全文(只能下載一次):`npx wrangler secret put APP_STORE_API_KEY < SubscriptionKey_XXXX.p8`。這把是 In-App Purchase 金鑰,跟 APNs、Sign in with Apple 的金鑰不同;列在 `secrets.required`,沒設定 wrangler 不會讓你部署;萬一缺或失效,綁定不查證(記 `lookup_unreachable`),不影響購買 |
 | APNs 驗證金鑰 Key ID | `wrangler.jsonc` 的 `APNS_KEY_ID` | Apple Developer → Keys,建立啟用 Apple Push Notifications service (APNs) 的金鑰(環境選 Sandbox & Production);Team ID 沿用 `APPLE_TEAM_ID` |
 | APNs 私鑰 | secret `APNS_PRIVATE_KEY` | 上一步下載的 `.p8` 全文:`npx wrangler secret put APNS_PRIVATE_KEY < AuthKey_XXXX.p8` |
