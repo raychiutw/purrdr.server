@@ -175,6 +175,8 @@ describe("主機外掛送推播", () => {
     expect(call.payload).toEqual({
       aps: {
         alert: { title: "weather-app", "loc-key": "An agent needs you." },
+        "mutable-content": 1,
+        "thread-id": expect.stringMatching(/^[0-9a-f]{64}$/),
         sound: "default",
         "interruption-level": "time-sensitive",
         category: "AGENT_BLOCKED",
@@ -320,6 +322,8 @@ describe("Agent 完成(done)與種類偏好", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { title: "weather-app", "loc-key": "An agent finished." },
+        "mutable-content": 1,
+        "thread-id": expect.stringMatching(/^[0-9a-f]{64}$/),
         sound: "default",
         "interruption-level": "active",
         category: "AGENT_DONE",
@@ -466,6 +470,8 @@ describe("Agent 可能卡住(stuck)與仍在等你(reminder)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { title: "weather-app", "loc-key": "An agent may be stuck." },
+        "mutable-content": 1,
+        "thread-id": expect.stringMatching(/^[0-9a-f]{64}$/),
         sound: "default",
         "interruption-level": "active",
         category: "AGENT_STUCK",
@@ -489,6 +495,8 @@ describe("Agent 可能卡住(stuck)與仍在等你(reminder)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { title: "weather-app", "loc-key": "An agent is still waiting for you." },
+        "mutable-content": 1,
+        "thread-id": expect.stringMatching(/^[0-9a-f]{64}$/),
         sound: "default",
         "interruption-level": "time-sensitive",
         category: "AGENT_REMINDER",
@@ -619,6 +627,7 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { "title-loc-key": "Host service", "loc-key": "Host service updated to %@.", "loc-args": ["0.7.0"] },
+        "mutable-content": 1,
         "interruption-level": "passive",
         category: "HOST_SERVICE_EVENT",
       },
@@ -639,6 +648,7 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { "title-loc-key": "Host service", "loc-key": locKey },
+        "mutable-content": 1,
         "interruption-level": "passive",
         category: "HOST_SERVICE_EVENT",
       },
@@ -887,6 +897,7 @@ describe("測試通知(event: test,#19)", () => {
     expect(call.payload).toEqual({
       aps: {
         alert: { "title-loc-key": "Test: Purrdr needs you", "loc-key": TEST_BODY },
+        "mutable-content": 1,
         sound: "default",
         "interruption-level": "active",
       },
@@ -903,6 +914,7 @@ describe("測試通知(event: test,#19)", () => {
     expect(identityProviders.apnsCalls[0]!.payload).toEqual({
       aps: {
         alert: { "title-loc-key": "Test: %@ needs you", "title-loc-args": ["Home Mac"], "loc-key": TEST_BODY },
+        "mutable-content": 1,
         sound: "default",
         "interruption-level": "active",
       },
@@ -1066,5 +1078,85 @@ describe("測試通知(event: test,#19)", () => {
     expect(limited.status).toBe(429);
     expect(limited.body.error.code).toBe("rate_limited");
     expect(identityProviders.apnsCalls).toHaveLength(10);
+  });
+});
+
+describe("標題「workspace · Tab」與分組(#31)", () => {
+  async function sendWith(extra: Record<string, unknown>) {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key);
+    const sent = await push({ ...blocked(key), ...extra });
+    return { sent, key, payload: identityProviders.apnsCalls[0]?.payload as any };
+  }
+
+  async function sha256Text(text: string) {
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  it("帶 tab:標題是「workspace · Tab」,內文仍是 loc-key", async () => {
+    const { sent, payload } = await sendWith({ tab: "Claude" });
+    expect(sent.status).toBe(200);
+    expect(payload.aps.alert).toEqual({ title: "weather-app · Claude", "loc-key": "An agent needs you." });
+  });
+
+  it("沒帶 tab(舊外掛):標題只有 workspace", async () => {
+    const { payload } = await sendWith({});
+    expect(payload.aps.alert.title).toBe("weather-app");
+  });
+
+  it("tab 是空白字串視同沒帶", async () => {
+    const { payload } = await sendWith({ tab: "   " });
+    expect(payload.aps.alert.title).toBe("weather-app");
+  });
+
+  it("tab 頭尾空白修掉、控制字元換成空白", async () => {
+    const { payload } = await sendWith({ tab: "  Co\nde  " });
+    expect(payload.aps.alert.title).toBe("weather-app · Co de");
+  });
+
+  it("tab 不是字串或超過 100 字元回 400,不轉 APNs", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key);
+    for (const tab of [1, null, ["a"], "x".repeat(101)]) {
+      const sent = await push({ ...blocked(key), tab });
+      expect(sent.status).toBe(400);
+      expect(sent.body.error.code).toBe("invalid_request");
+    }
+    expect(identityProviders.apnsCalls).toHaveLength(0);
+  });
+
+  it("加 mutable-content: 1 與 thread-id(配對雜湊與 workspace 的雜湊,不含主機名稱)", async () => {
+    const { payload, key } = await sendWith({ tab: "Claude" });
+    expect(payload.aps["mutable-content"]).toBe(1);
+    const expected = await sha256Text(`${await hashOf(key)}\n${"weather-app"}`);
+    expect(payload.aps["thread-id"]).toBe(expected);
+    expect(payload.aps["thread-id"]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("同一配對同一 workspace 的 thread-id 相同(與 tab 無關),不同 workspace 不同", async () => {
+    const me = await subscribedMember();
+    const key = pairingKey();
+    await register(me.accessToken, key);
+    await push({ ...blocked(key), tab: "A" });
+    await push({ ...blocked(key), tab: "B" });
+    await push({ ...blocked(key), workspace: "other", tab: "A" });
+    const ids = identityProviders.apnsCalls.map((call) => (call.payload as any).aps["thread-id"]);
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+
+  it("主機服務事件與測試通知也加 mutable-content: 1", async () => {
+    const { key } = await hostServicePairing();
+    await push(hostEvent(key, "host_service_update_available"));
+    await push({ key, event: "test" });
+    const payloads = identityProviders.apnsCalls.map((call) => call.payload as any);
+    expect(payloads).toHaveLength(2);
+    for (const payload of payloads) {
+      expect(payload.aps["mutable-content"]).toBe(1);
+      expect(payload.aps["thread-id"]).toBeUndefined();
+    }
   });
 });
