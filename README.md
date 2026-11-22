@@ -25,7 +25,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 
 | 方法與路徑 | 權杖 | 說明 |
 |---|---|---|
-| `POST /v1/sessions` | — | 登入。body `{ provider: "apple"\|"google", idToken, nonce, authorizationCode?, deviceId?, platform? }`;Apple 必須帶 `authorizationCode`。`deviceId` 選填,是 app 存在 Keychain 的 UUID(1~64 字元的英數與 `.` `_` `:` `-`,不合 400 `invalid_request`;大小寫不拘,後台一律存小寫):帶了就以它建立或更新裝置,並撤銷這支裝置舊的工作階段(每裝置一個);別的會員在這支裝置上還有未撤銷的工作階段時不動那列,這次登入另建一列裝置(見「規則」的「裝置與工作階段」);沒帶(舊 app)維持每次登入建一個裝置。`platform` 選填(`ios`|`android`,預設 `ios`,不合法 400 `invalid_request`),寫進新建的裝置列。回 `{ accessToken, accessTokenExpiresAt, refreshToken, memberCreated, autoLinked, member }`;新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email 時歸到那個會員(`autoLinked: true`、`memberCreated: false`),見「規則」的「登入與自動合併」 |
+| `POST /v1/sessions` | — | 登入。body `{ provider: "apple"\|"google", idToken, nonce, authorizationCode?, deviceId?, platform?, createMember? }`;`createMember` 選填布林(預設 `true`,不是布林 400 `invalid_request`):帶 `false` 是「只登入」,查無會員時回 404 `member_not_found`、不建立會員、身分、裝置或工作階段(新身分的已驗證 email 與既有會員相同時仍自動合併進那個會員,不算查無會員;Apple 的 authorization code 在判斷前已換過,換到的 refresh token 不保存);Apple 必須帶 `authorizationCode`。`deviceId` 選填,是 app 存在 Keychain 的 UUID(1~64 字元的英數與 `.` `_` `:` `-`,不合 400 `invalid_request`;大小寫不拘,後台一律存小寫):帶了就以它建立或更新裝置,並撤銷這支裝置舊的工作階段(每裝置一個);別的會員在這支裝置上還有未撤銷的工作階段時不動那列,這次登入另建一列裝置(見「規則」的「裝置與工作階段」);沒帶(舊 app)維持每次登入建一個裝置。`platform` 選填(`ios`|`android`,預設 `ios`,不合法 400 `invalid_request`),寫進新建的裝置列。回 `{ accessToken, accessTokenExpiresAt, refreshToken, memberCreated, autoLinked, member }`;新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email 時歸到那個會員(`autoLinked: true`、`memberCreated: false`),見「規則」的「登入與自動合併」 |
 | `POST /v1/sessions/refresh` | — | body `{ refreshToken }`,換一組新權杖。舊的更新權杖有 60 秒寬限:寬限內重送回傳**同一組**新權杖;寬限外再用舊權杖視為外洩,撤銷該工作階段並回 401。回應同登入，但沒有 `memberCreated` |
 | `POST /v1/sessions/revoke` | — | 登出。body `{ refreshToken }`,回 204 |
 | `GET /v1/members/me/sessions` | 存取權杖 | 列出自己未撤銷、未過期的工作階段(每裝置一個)。回 `{ sessions: [{ id, deviceId, deviceName, deviceModel, createdAt, lastActiveAt, expiresAt, current }] }`;`current` 是發出這個存取權杖的工作階段;`deviceName`／`deviceModel` 沒有時為 `null`;時間為 ISO 8601。存取權杖所屬的工作階段已撤銷也回 401 |
@@ -59,7 +59,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 
 `member` 的形狀:`{ id, identities: [{ provider, email, linkedAt }] }`(email 可能是 Apple private relay,也可能是 `null`)。
 
-`subscription` 的形狀:`{ status, store, productId, expiresAt, gracePeriodExpiresAt, willAutoRenew }`。`status` 是 `active`、`in_grace_period`(扣款失敗、Apple 重試中，仍有權限)、`expired`、`revoked`(退款或撤銷);`store` 是 `app_store`／`google_play`;`willAutoRenew` 在還沒收過續訂資訊時是 `null`。會員有多個訂閱時回有效的那個，其次是最晚到期的。
+`subscription` 的形狀:`{ status, store, productId, expiresAt, gracePeriodExpiresAt, willAutoRenew, pendingReview }`。`status` 依到期與撤銷時間推算,只會是 `active`、`in_grace_period`(扣款失敗、Apple 重試中，仍有權限)、`expired`、`revoked`(退款或撤銷);資料庫記的 `billing_retry`(寬限期結束、Apple 仍在重試,沒有權限)對外是 `expired`,不會回 `billing_retry`;`pendingReview` 是遷移合併留下的待處理標記(`true` 時帳號頁提示使用者處理);`store` 是 `app_store`／`google_play`;`willAutoRenew` 在還沒收過續訂資訊時是 `null`。會員有多個訂閱時回有效的那個，其次是最晚到期的。
 
 `changes` 的每一筆是修改(新增也是)`{ id, name, address, port, username, connectionMethod, hostKeyFingerprint, modifiedAt }`
 或刪除 `{ id, deleted: true }`;回應的 `hosts` 每一筆是同樣的修改形狀，依 `id` 排序。`id` 是 app 產生的 UUID(後台一律回小寫);
