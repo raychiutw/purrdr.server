@@ -124,15 +124,16 @@ describe("綁定 Google Play 訂閱", () => {
   it("沒設定服務帳戶金鑰(Android 上線前)時綁定回 502 store_unavailable,不寫入", async () => {
     const me = await member();
     serveGoogle({ tokenA: purchase({ expiryTime: Date.now() + 29 * DAY }) });
-    const original = env.GOOGLE_PLAY_SERVICE_ACCOUNT_KEY;
-    delete (env as { GOOGLE_PLAY_SERVICE_ACCOUNT_KEY?: string }).GOOGLE_PLAY_SERVICE_ACCOUNT_KEY;
+    const optionalEnv = env as { GOOGLE_PLAY_SERVICE_ACCOUNT_KEY?: string };
+    const original = optionalEnv.GOOGLE_PLAY_SERVICE_ACCOUNT_KEY;
+    delete optionalEnv.GOOGLE_PLAY_SERVICE_ACCOUNT_KEY;
     try {
       const bind = await bindGoogle(me.accessToken, "tokenA");
       expect(bind.status).toBe(502);
       expect(bind.body.error.code).toBe("store_unavailable");
       expect(await stored("tokenA")).toBeNull();
     } finally {
-      (env as { GOOGLE_PLAY_SERVICE_ACCOUNT_KEY?: string }).GOOGLE_PLAY_SERVICE_ACCOUNT_KEY = original;
+      optionalEnv.GOOGLE_PLAY_SERVICE_ACCOUNT_KEY = original;
     }
   });
 
