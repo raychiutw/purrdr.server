@@ -25,11 +25,11 @@ async function count(table: string): Promise<number> {
 async function giveSubscription(memberId: string) {
   const now = Date.now();
   await env.DB.prepare(
-    `INSERT INTO entitlements (store, original_transaction_id, member_id, environment, product_id, transaction_id,
-       purchased_at, expires_at, transaction_signed_at, updated_at)
-     VALUES ('app_store', ?, ?, 'Sandbox', 'com.raychiu.purrdr.plus.monthly', '1', ?, ?, ?, ?)`,
+    `INSERT INTO subscriptions (id, member_id, store, external_id, product_id, status, expires_at, environment, updated_at,
+       current_transaction_id, purchased_at, transaction_signed_at)
+     VALUES (?, ?, 'app_store', ?, 'com.raychiu.purrdr.plus.monthly', 'active', ?, 'sandbox', ?, '1', ?, ?)`,
   )
-    .bind(`original-${memberId}`, memberId, now, now + 86_400_000, now, now)
+    .bind(crypto.randomUUID(), memberId, `original-${memberId}`, now + 86_400_000, now, now, now)
     .run();
 }
 
@@ -204,7 +204,7 @@ describe("刪除會員", () => {
     expect(identityProviders.appleRevokeCalls).toEqual([
       { token: "apple-refresh-for-code-apple-user-1", tokenTypeHint: "refresh_token", clientSecretValid: true },
     ]);
-    for (const table of ["members", "identities", "refresh_tokens", "entitlements", "synced_hosts"]) {
+    for (const table of ["members", "identities", "sessions", "devices", "subscriptions", "synced_hosts"]) {
       expect(await count(table), table).toBe(0);
     }
     expect((await api("GET", "/v1/members/me", { accessToken: apple.body.accessToken })).status).toBe(401);

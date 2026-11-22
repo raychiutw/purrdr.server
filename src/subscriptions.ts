@@ -35,12 +35,12 @@ type Row = {
   store: "app_store" | "google_play";
   member_id: string;
   product_id: string;
-  transaction_id: string;
-  purchased_at: number;
+  current_transaction_id: string | null;
+  purchased_at: number | null;
   expires_at: number;
   revoked_at: number | null;
-  will_auto_renew: number | null;
-  grace_period_expires_at: number | null;
+  auto_renew: number | null;
+  grace_expires_at: number | null;
 };
 
 function statusOf(row: Row, now: number): SubscriptionStatus {
@@ -50,7 +50,7 @@ function statusOf(row: Row, now: number): SubscriptionStatus {
   if (row.expires_at > now) {
     return "active";
   }
-  if (row.grace_period_expires_at !== null && row.grace_period_expires_at > now) {
+  if (row.grace_expires_at !== null && row.grace_expires_at > now) {
     return "in_grace_period";
   }
   return "expired";
@@ -59,7 +59,7 @@ function statusOf(row: Row, now: number): SubscriptionStatus {
 const isActive = (status: SubscriptionStatus) => status === "active" || status === "in_grace_period";
 
 async function rowsOf(env: Env, memberId: string): Promise<Row[]> {
-  const { results } = await env.DB.prepare("SELECT * FROM entitlements WHERE member_id = ?").bind(memberId).all<Row>();
+  const { results } = await env.DB.prepare("SELECT * FROM subscriptions WHERE member_id = ?").bind(memberId).all<Row>();
   return results;
 }
 
@@ -77,8 +77,8 @@ export async function subscriptionView(env: Env, memberId: string, now = Date.no
     store: best.row.store,
     productId: best.row.product_id,
     expiresAt: new Date(best.row.expires_at).toISOString(),
-    gracePeriodExpiresAt: best.row.grace_period_expires_at === null ? null : new Date(best.row.grace_period_expires_at).toISOString(),
-    willAutoRenew: best.row.will_auto_renew === null ? null : best.row.will_auto_renew === 1,
+    gracePeriodExpiresAt: best.row.grace_expires_at === null ? null : new Date(best.row.grace_expires_at).toISOString(),
+    willAutoRenew: best.row.auto_renew === null ? null : best.row.auto_renew === 1,
   };
 }
 
@@ -132,7 +132,7 @@ async function verifiedTransaction(env: Env, jws: string): Promise<TransactionPa
 }
 
 async function ownerOf(env: Env, originalTransactionId: string): Promise<string | null> {
-  const row = await env.DB.prepare("SELECT member_id FROM entitlements WHERE store = 'app_store' AND original_transaction_id = ?")
+  const row = await env.DB.prepare("SELECT member_id FROM subscriptions WHERE store = 'app_store' AND external_id = ?")
     .bind(originalTransactionId)
     .first<{ member_id: string }>();
   return row?.member_id ?? null;
@@ -142,33 +142,65 @@ async function memberExists(env: Env, memberId: string): Promise<boolean> {
   return (await env.DB.prepare("SELECT 1 AS found FROM members WHERE id = ?").bind(memberId).first()) !== null;
 }
 
+/// 一個會員同時最多一個有效訂閱(subscriptions 的部分唯一索引)。
+const ONE_LIVE_SUBSCRIPTION = /UNIQUE constraint failed: subscriptions\.member_id/;
+
 /// 寫入交易：較晚購買的交易(續訂、升降級)取代舊的;同一筆交易只接受簽章時間不早於現有的(退款、撤銷、撤銷被取消)。
 /// 晚到的舊交易不會蓋掉新狀態。
+///
+/// `status` 是寫入當下依到期時間推算的快照(讀取一律重新推算);沒收到到期通知的舊列會一直佔著「有效訂閱」的名額,
+/// 所以寫入前先把這個會員已經到期(含寬限)的有效列改成 expired。
 async function applyTransaction(env: Env, memberId: string, transaction: TransactionPayload): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO entitlements (store, original_transaction_id, member_id, environment, product_id, transaction_id,
-       purchased_at, expires_at, revoked_at, transaction_signed_at, updated_at)
-     VALUES ('app_store', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (store, original_transaction_id) DO UPDATE SET
-       environment = excluded.environment, product_id = excluded.product_id, transaction_id = excluded.transaction_id,
-       purchased_at = excluded.purchased_at, expires_at = excluded.expires_at, revoked_at = excluded.revoked_at,
-       transaction_signed_at = excluded.transaction_signed_at, updated_at = excluded.updated_at
-     WHERE excluded.purchased_at > entitlements.purchased_at
-        OR (excluded.transaction_id = entitlements.transaction_id AND excluded.transaction_signed_at >= entitlements.transaction_signed_at)`,
-  )
-    .bind(
-      transaction.originalTransactionId,
-      memberId,
-      transaction.environment,
-      transaction.productId,
-      transaction.transactionId,
-      transaction.purchaseDate,
-      transaction.expiresDate,
-      transaction.revocationDate ?? null,
-      transaction.signedDate,
-      Date.now(),
-    )
-    .run();
+  const now = Date.now();
+  // verifiedTransaction 已確認 expiresDate 是數字。
+  const expiresAt = transaction.expiresDate ?? 0;
+  const status = transaction.revocationDate != null ? "revoked" : expiresAt > now ? "active" : "expired";
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE subscriptions SET status = 'expired', updated_at = ?1
+         WHERE member_id = ?2 AND status IN ('active', 'grace', 'billing_retry') AND revoked_at IS NULL
+           AND expires_at <= ?1 AND COALESCE(grace_expires_at, 0) <= ?1
+           AND NOT (store = 'app_store' AND external_id = ?3)`,
+      ).bind(now, memberId, transaction.originalTransactionId),
+      env.DB.prepare(
+        `INSERT INTO subscriptions (id, member_id, store, external_id, product_id, status, expires_at, environment, updated_at,
+           current_transaction_id, purchased_at, revoked_at, transaction_signed_at)
+         VALUES (?1, ?2, 'app_store', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT (store, external_id) DO UPDATE SET
+           environment = excluded.environment, product_id = excluded.product_id, current_transaction_id = excluded.current_transaction_id,
+           purchased_at = excluded.purchased_at, expires_at = excluded.expires_at, revoked_at = excluded.revoked_at,
+           transaction_signed_at = excluded.transaction_signed_at, updated_at = excluded.updated_at,
+           status = CASE
+             WHEN excluded.revoked_at IS NOT NULL THEN 'revoked'
+             WHEN excluded.expires_at > ?8 THEN 'active'
+             WHEN COALESCE(subscriptions.grace_expires_at, 0) > ?8 THEN 'grace'
+             ELSE 'expired'
+           END
+         WHERE excluded.purchased_at > subscriptions.purchased_at
+            OR (excluded.current_transaction_id = subscriptions.current_transaction_id
+                AND excluded.transaction_signed_at >= subscriptions.transaction_signed_at)`,
+      ).bind(
+        crypto.randomUUID(),
+        memberId,
+        transaction.originalTransactionId,
+        transaction.productId,
+        status,
+        expiresAt,
+        transaction.environment === "Sandbox" ? "sandbox" : "production",
+        now,
+        transaction.transactionId,
+        transaction.purchaseDate,
+        transaction.revocationDate ?? null,
+        transaction.signedDate,
+      ),
+    ]);
+  } catch (error) {
+    if (error instanceof Error && ONE_LIVE_SUBSCRIPTION.test(error.message)) {
+      throw new ApiError(409, "subscription_already_active", "This member already has an active subscription.");
+    }
+    throw error;
+  }
 }
 
 /// POST /v1/members/me/subscription/app-store:app 在購買、恢復購買、兌換 Offer Code 與收到交易更新時提交。
@@ -262,8 +294,14 @@ async function applyRenewalInfo(env: Env, jws: string, originalTransactionId: st
     throw invalidNotification("renewal info");
   }
   await env.DB.prepare(
-    `UPDATE entitlements SET will_auto_renew = ?, grace_period_expires_at = ?, renewal_signed_at = ?, updated_at = ?
-     WHERE store = 'app_store' AND original_transaction_id = ? AND (renewal_signed_at IS NULL OR renewal_signed_at <= ?)`,
+    `UPDATE subscriptions SET auto_renew = ?1, grace_expires_at = ?2, renewal_signed_at = ?3, updated_at = ?4,
+       status = CASE
+         WHEN revoked_at IS NOT NULL THEN 'revoked'
+         WHEN expires_at > ?4 THEN 'active'
+         WHEN COALESCE(?2, 0) > ?4 THEN 'grace'
+         ELSE 'expired'
+       END
+     WHERE store = 'app_store' AND external_id = ?5 AND (renewal_signed_at IS NULL OR renewal_signed_at <= ?3)`,
   )
     .bind(
       info.autoRenewStatus === undefined ? null : info.autoRenewStatus === 1 ? 1 : 0,
@@ -271,7 +309,6 @@ async function applyRenewalInfo(env: Env, jws: string, originalTransactionId: st
       info.signedDate,
       Date.now(),
       originalTransactionId,
-      info.signedDate,
     )
     .run();
 }

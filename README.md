@@ -62,7 +62,7 @@ app 以這兩個欄位組回主機服務位址(loopback 是本機測試、用 ht
 app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 
 首次部署(後台還沒上線過，也沒有舊資料):依「上線前要填的東西」填好設定後，先 `npx wrangler d1 migrations apply purrdr --remote`
-(套用 `0001`～`0005`),再 `npx wrangler deploy`,最後把後台網址填進 app 的 `BackendConfiguration.swift` 發版。後台是手動部署，
+(套用 `0001`～`0009`),再 `npx wrangler deploy`,最後把後台網址填進 app 的 `BackendConfiguration.swift` 發版。後台是手動部署，
 不會跟著 app 發布上線。
 
 存取權杖放在 `Authorization: Bearer <accessToken>`。
@@ -88,6 +88,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 502 | `apns_failed` | APNs 拒絕或連不上(配對保留) |
 | 409 | `identity_in_use` | 要連結的身分屬於另一個有訂閱或同步資料的會員 |
 | 409 | `subscription_in_use` | 這個 App Store 訂閱已屬於另一個會員 |
+| 409 | `subscription_already_active` | 這個會員已有另一個有效訂閱(一個會員同時最多一個:有效 = 生效中、帳單寬限期、帳單重試期);換訂閱要等原訂閱不再有效 |
 | 409 | `last_identity` | 解除最後一種登入方式 |
 | 502 | `provider_unavailable` | 連不上 Apple／Google |
 | 502 | `apple_revoke_failed` | 刪除會員時撤銷 Sign in with Apple 權杖失敗;資料沒有刪，請稍後重試 |
@@ -95,13 +96,13 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 ### 規則
 
 - **nonce**:app 每次登入產生隨機 nonce,把原文送來。Sign in with Apple 交給 Apple 的是 nonce 的 SHA-256(小寫 hex),Google 是原文;後台依此比對 ID token 的 `nonce`。
-- **權杖**:存取權杖是 HS256 JWT,15 分鐘;更新權杖 90 天、只存雜湊、用一次就輪替。
-- **連結衝突**(ADR-0007):身分屬於另一個會員時，對方沒有 `entitlements` 也沒有 `synced_hosts` 就併入：身分移過來，對方會員(連同其餘身分、權杖)刪除;對方其餘的 Apple 身分先撤銷(盡力而為)。否則 409 `identity_in_use`。
+- **權杖**:存取權杖是 HS256 JWT,15 分鐘;更新權杖 90 天、只存雜湊(`sessions`,每次登入一個工作階段)、用一次就輪替。
+- **連結衝突**(ADR-0007):身分屬於另一個會員時，對方沒有 `subscriptions` 也沒有 `synced_hosts` 就併入：身分移過來，對方會員(連同其餘身分、權杖)刪除;對方其餘的 Apple 身分先撤銷(盡力而為)。否則 409 `identity_in_use`。
 - **解除 Apple**:同時撤銷該 Sign in with Apple 權杖(盡力而為)。
 - **訂閱權限**(ADR-0007):app 購買時以 `appAccountToken` 帶入會員 ID;交易與通知都只信任 App Store 簽的 JWS:`x5c` 三張憑證、最上層與 `APPLE_ROOT_CERTIFICATES` 逐位元組相同、逐層簽章正確、中繼與葉帶 Apple 的 OID、在 `signedDate` 時都在有效期間、JWS 是 ES256 由葉憑證簽(與 App Store Server Library 相同，不做線上 OCSP)。另外檢查 bundle id、環境(Production 與 Sandbox 都收：App Review 與 TestFlight 是 Sandbox)、商品、正式環境通知的 app Apple ID。
 - **訂閱歸屬**:一個 App Store 訂閱(original transaction)只屬於一個會員。已登記的只屬於原會員;`appAccountToken` 是另一個現有會員時不能被領走(409 `subscription_in_use`);沒有 `appAccountToken`(在 App Store 兌換 Offer Code)或原會員已刪除時，歸提交的會員。
 - **通知**:不依通知類型個別處理，而是寫入通知裡的交易與續訂資訊：續訂帶新的到期時間、到期的時間已過、退款與撤銷帶 `revocationDate`、撤銷被取消時不帶。較晚購買的交易取代舊的;同一筆交易只接受簽章時間不早於現有的;續訂資訊也依簽章時間，晚到的舊通知不會蓋掉新狀態。沒登記且 `appAccountToken` 不是現有會員的訂閱略過(回 200)。
-- **權限判定**:沒有 `revoked_at`,且到期時間或帳單寬限期還沒過。推播與主機同步用 `src/subscriptions.ts` 的 `hasActiveSubscription`／`requireActiveSubscription`(403 `subscription_required`)。
+- **權限判定**:沒有 `revoked_at`,且到期時間或帳單寬限期還沒過(讀取時依時間推算;`subscriptions.status` 是寫入當下的快照,寫入新訂閱前會先把這個會員已到期的有效列改成 `expired`)。推播與主機同步用 `src/subscriptions.ts` 的 `hasActiveSubscription`／`requireActiveSubscription`(403 `subscription_required`)。
 - **推播**(ADR-0004、#29):app 產生 32 bytes 配對密鑰(64 位小寫 hex),只把那 32 bytes 的 SHA-256(小寫 hex)交給後台;密鑰本身只在 app 與主機的 `~/.purrdr/push-<裝置>/pairing`。主機外掛送推播時帶密鑰，後台算雜湊找配對 → 會員要有有效訂閱 → 種類要在配對的 `kinds` 偏好內(否則回 `{ delivered: false }`,不呼叫 APNs)→ 主機服務事件去重 → 每組密鑰每分鐘 10 則(只計真的要送 APNs 的，偏好或去重擋下的不計，避免擠掉「需要你」;速率限制、訂閱檢查與 410 對所有種類一致)→ 由後台自己組 APNs payload(標題 = workspace 名稱、根層 `pairing`(雜湊)、`pane`、`status`;`category` 讓 app 設定隱藏預覽時的通用文字):
   - `blocked`(需要你):`loc-key` 「An agent needs you.」、`interruption-level: time-sensitive`、`category: AGENT_BLOCKED`。
   - `done`(完成):`loc-key` 「An agent finished.」、`interruption-level: active`、`category: AGENT_DONE`。
@@ -121,9 +122,9 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
   外掛與主機服務不能決定推播內容，只能送 workspace 名稱、狀態、pane id、事件種類與版本號，所以對話內容不經過後台與 APNs。APNs provider token(ES256)每 50 分鐘重簽一次。推播配對不算「擋合併的資料」;刪除會員時一併刪除。
 - **通知裝置**(purrdr.server#5):一組配對 = 一支裝置 × 一台主機;註冊配對時帶 `deviceId`(app 產生、存在 Keychain 的 UUID,大小寫不拘、後台存小寫)、`deviceName`(去頭尾空白後 1～64 字，不能含控制字元、格式字元(零寬、bidi 覆寫)與行／段落分隔;改名同規則)、`model`(`iPhone`／`iPad`),同一個 `deviceId` 的配對歸成一台裝置。名稱已存在時註冊不覆蓋(使用者改的名稱以 PATCH 為準)。
   - 清單：`hostCount` = 配對數(開了幾台主機)、`lastRegisteredAt` = 最後註冊或更新配對的時間(epoch 毫秒)、`current` = 是否等於 `currentDeviceId`;不回 device token、配對密鑰與雜湊。只列至少有一組配對的裝置，最新的在前。
-  - 舊版 app 沒帶 `deviceId` 的配對以 device token 歸類，`deviceId` 是 `legacy-` 加 token 的 SHA-256 前 32 位 hex,`name`／`model` 為 `null`(app 顯示「未命名裝置」);可用這個 id 撤銷或改名;改名後這個 id 會記到配對上，同一支裝置之後再用舊版 app 新增的配對仍歸成同一台。
+  - 舊版 app 沒帶 `deviceId` 的配對以 device token 歸類，`deviceId` 是 `legacy-` 加 token 的 SHA-256 前 32 位 hex,`name`／`model` 為 `null`(app 顯示「未命名裝置」);可用這個 id 撤銷或改名;改名存在 `devices.name`(舊版 app 的新配對以同一組 device token 歸成同一台)。0009 遷移前就存在的舊配對,`devices.id` 是 `token:<device token>`,對外一律換成同一個 `legacy-` 加雜湊的 id,device token 不出後台。
   - 遠端關閉：刪除配對並記入 `revoked_push_pairings`,主機外掛之後用那組密鑰送推播回 410 `pairing_revoked`(外掛據此清掉本機的 `push-<裝置>` 目錄);同一組密鑰重新註冊就恢復。410 只回一次(回完刪掉紀錄，之後是 404),每次遠端關閉時順手刪掉 90 天前的紀錄。以密鑰撤銷(`DELETE .../push-pairings/{keyHash}`,裝置自己關)則照舊回 404。
-- **合併規則**:會員只要有 `entitlements` 列(不論是否過期)或 `synced_hosts` 列(含刪除紀錄)就不是空會員。
+- **合併規則**:會員只要有 `subscriptions` 列(不論是否過期)或 `synced_hosts` 列(含刪除紀錄)就不是空會員。
 - **主機同步**(#30、ADR-0007):
   - 要有效的 Purrdr Plus,讀取也是;到期後資料保留(續訂後接著用),刪除會員時一起刪。
   - 以單一主機為單位**最後修改者勝**:比 `modifiedAt`,比已存的新才取代，一樣新時保留已存的;回應永遠是套用後的整份清單，app 以它為準。
@@ -137,7 +138,34 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 
 ## 資料表
 
-見 `migrations/`。`members`、`identities`、`refresh_tokens` 是 #27 的;`entitlements`(訂閱權限)是 #28 的;`push_pairings`(推播配對，含每組密鑰的速率限制計數)是 #29 的，`device_id`、`push_devices`(裝置名稱與型號)、`revoked_push_pairings`(遠端關閉的配對)是 purrdr.server#5 的，`push_pairings.kinds`(推播種類偏好)是 purrdr.server#10 的，`host_service_push_events`(主機服務事件的 24 小時去重)是 purrdr.server#11 的;`synced_hosts`(主機同步)是 #30 的。之後新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`。
+見 `migrations/`。會員架構重做(purrdr.server#22,規格 raychiutw/purrdr.ios#402)之後,所有時間是 Unix epoch 毫秒:
+
+| 表 | 內容 |
+|---|---|
+| `members` | `id`、`created_at`、`deleted_at`(目前刪除是硬刪,欄位先留) |
+| `identities` | 登入方式:`provider`(apple\|google)、`subject`、`email`、`email_verified`、`is_private_relay`、`apple_refresh_token`(加密)、`linked_at`;唯一 `(provider, subject)`。`email_verified` 是 token 的 `email_verified`,Apple 私密轉寄一律 0(不參與自動合併) |
+| `subscriptions` | 訂閱:`store`(app_store\|google_play)、`external_id`(App Store 的 original transaction ID／Google Play 的 purchase token)、`status`(active\|grace\|billing_retry\|expired\|revoked\|refunded)、`expires_at`、`auto_renew`、`environment`(sandbox\|production)…;唯一 `(store, external_id)`;**部分唯一索引 `subscriptions_one_live_per_member`:每個會員在 `status` 是 active／grace／billing_retry 且 `pending_review = 0` 的列最多一筆**。`pending_review` 是遷移合併留下的「待處理」標記(見下) |
+| `subscription_events` | 稽核與冪等:`source`(store_notification\|store_api\|client)、`type`、`notification_uuid`(唯一) |
+| `subscription_transfers` | 轉移紀錄:`from_member`、`to_member` |
+| `devices` | 一支實體裝置一列(`id` = app 的 Keychain `device_id`):`member_id`(可空)、`platform`(ios\|android)、`name`、`model`、`push_token`、`push_environment`、`revoked_at` |
+| `sessions` | 工作階段:每個裝置最多一個未撤銷的(部分唯一索引);`refresh_token_hash`、`previous_refresh_token_hash`、`rotated_at`、`grace_until`(輪替寬限,purrdr.server#23)、`revoked_at` |
+| `push_pairings` | 推播配對:`key_hash`(唯一)、`device_id`(→ `devices`;推播權杖在裝置上)、`kinds`、`muted`(靜音清單,JSON,預設 `[]`)、速率限制計數 |
+| `synced_hosts` | 主機同步(沿用既有,欄位本來就符合規格:內容欄位、`modified_at` 當版本、`deleted_at`) |
+
+另外有 `revoked_push_pairings`(遠端關閉的配對)與 `host_service_push_events`(主機服務事件的 24 小時去重)。之後新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`。
+`subscriptions` 比規格多的欄位(`current_transaction_id`、`purchased_at`、`revoked_at`、`transaction_signed_at`、`grace_expires_at`、`renewal_signed_at`)是 App Store 的簽章時間與寬限期,晚到的舊通知靠它判斷新舊。
+
+### 0009 遷移(會員架構重做)
+
+`migrations/0009_member_architecture.sql` 同時建新表與搬舊資料(`entitlements` → `subscriptions`、`refresh_tokens` 丟掉、`push_devices` 併入 `devices`、`push_pairings` 的裝置權杖移到 `devices`),搬完就刪舊表。
+
+- **合併**:已驗證 email 相同(不分大小寫)的會員合併成一個,登入方式都保留。舊資料沒有 `email_verified`,判定為:Google 的 email 與 Apple 非私密轉寄(`@privaterelay.appleid.com`)視為已驗證,私密轉寄不參與。群組以共用 email 連起來(三輪傳遞,A~B、B~C 也併成一群)。留下的會員:有有效訂閱者優先,其次最早建立。被合併掉的會員,它的訂閱、主機、推播配對與裝置都歸留下的會員;同一個 `host_id` 取 `modified_at` 最新者。
+- **訂閱**:`status` 依遷移當下的時間推算(退款 → revoked、未到期 → active、帳單寬限期內 → grace、其餘 expired)。合併後同一個會員有多個有效訂閱時,到期(含寬限)最晚者保留,其餘標 `pending_review = 1`(保留真實狀態、不佔有效訂閱的名額),之後帳號頁提示使用者處理。
+- **登入**:舊的更新權杖全部作廢(沒有搬到 `sessions`),使用者重新登入一次。
+- **冪等**:wrangler 以 `d1_migrations` 記錄套用過的 migration,**同一個 migration 只會跑一次**,重複執行 `migrations apply` 不會再動資料(`test/migration-0009.test.ts` 驗證)。這個 migration 本身不能整段重跑(舊表搬完就刪)。
+- **回滾**:D1 的 migration 不能 down。套用前先記下目前的 bookmark:`npx wrangler d1 time-travel info purrdr`;出問題用 `npx wrangler d1 time-travel restore purrdr --bookmark=<bookmark>` 還原整個資料庫(保留期間內有效,依 Cloudflare 方案 7 或 30 天),再把 Worker 退回上一版(`npx wrangler rollback`)。還原會丟掉套用後新登入與新訂閱的資料,所以要在 Worker 還沒對外使用新版前決定。
+- **順序**:先套用 migration,再 `npx wrangler deploy`(舊版 Worker 讀不了新表,新版 Worker 讀不了舊表,中間會有一小段空窗;兩步請連續做)。**部署由使用者手動執行**。
+- 測試:`test/migration-0009.test.ts` 先建出 0001~0008 的舊資料庫、塞一份快照(合併、私密轉寄不合併、兩邊都有有效訂閱、寬限期、退款、裝置與配對、重複主機)再套用 0009;`test/schema.test.ts` 驗證各項限制。
 
 ## 上線前要填的東西
 

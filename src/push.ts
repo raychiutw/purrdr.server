@@ -1,6 +1,6 @@
 import { importPKCS8, SignJWT } from "jose";
 import { ApiError, readJson, requireString } from "./http";
-import { readDeviceIdentity, saveDeviceStatement } from "./push-devices";
+import { legacyDeviceId, readDeviceIdentity } from "./push-devices";
 import { hasActiveSubscription, requireActiveSubscription } from "./subscriptions";
 
 /// 推播(#29、ADR-0004、ADR-0007)。
@@ -83,27 +83,38 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
   const kinds = readKinds(body);
   await requireActiveSubscription(env, memberId);
 
-  const now = Date.now();
-  const saved = await env.DB.prepare(
-    `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, device_id, kinds, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, ?), ?, ?)
-     ON CONFLICT (key_hash) DO UPDATE SET
-       platform = excluded.platform, device_token = excluded.device_token, environment = excluded.environment,
-       device_id = COALESCE(excluded.device_id, push_pairings.device_id),
-       kinds = COALESCE(?, push_pairings.kinds), updated_at = excluded.updated_at
-     WHERE push_pairings.member_id = excluded.member_id
-     RETURNING key_hash`,
-  )
-    .bind(keyHash, memberId, platform, deviceToken, environment, device.deviceId, kinds, JSON.stringify(DEFAULT_PAIRING_KINDS), now, now, kinds)
-    .first();
-  if (saved === null) {
+  const existing = await env.DB.prepare("SELECT member_id, device_id FROM push_pairings WHERE key_hash = ?")
+    .bind(keyHash)
+    .first<{ member_id: string; device_id: string }>();
+  if (existing !== null && existing.member_id !== memberId) {
     throw new ApiError(409, "pairing_in_use", "This pairing key belongs to another member.");
   }
-  const saveDevice = saveDeviceStatement(env, memberId, device);
-  await env.DB.batch([
+  // 舊版 app 不帶 deviceId:沿用這組配對原本的裝置;新配對以 device token 的雜湊當裝置 id。
+  const deviceId = device.deviceId ?? existing?.device_id ?? (await legacyDeviceId(deviceToken));
+
+  const now = Date.now();
+  const [, saved] = await env.DB.batch([
+    // 同一支裝置的所有配對共用一組推播權杖,放在 devices。已有名稱就保留(使用者改過的名稱不被預設名稱蓋掉)。
+    env.DB.prepare(
+      `INSERT INTO devices (id, member_id, platform, name, model, push_token, push_environment, created_at, last_seen_at)
+       VALUES (?1, ?2, 'ios', ?3, ?4, ?5, ?6, ?7, ?7)
+       ON CONFLICT (id) DO UPDATE SET
+         member_id = excluded.member_id, push_token = excluded.push_token, push_environment = excluded.push_environment,
+         name = COALESCE(devices.name, excluded.name), model = COALESCE(excluded.model, devices.model), last_seen_at = excluded.last_seen_at,
+         revoked_at = NULL`,
+    ).bind(deviceId, memberId, device.name, device.model, deviceToken, environment, now),
+    env.DB.prepare(
+      `INSERT INTO push_pairings (id, member_id, device_id, key_hash, kinds, created_at, updated_at)
+       VALUES (?, ?, ?, ?, COALESCE(?, ?), ?, ?)
+       ON CONFLICT (key_hash) DO UPDATE SET
+         device_id = excluded.device_id, kinds = COALESCE(?, push_pairings.kinds), updated_at = excluded.updated_at
+       WHERE push_pairings.member_id = excluded.member_id`,
+    ).bind(crypto.randomUUID(), memberId, deviceId, keyHash, kinds, JSON.stringify(DEFAULT_PAIRING_KINDS), now, now, kinds),
     env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ?").bind(keyHash),
-    ...(saveDevice === null ? [] : [saveDevice]),
   ]);
+  if (saved?.meta.changes === 0) {
+    throw new ApiError(409, "pairing_in_use", "This pairing key belongs to another member.");
+  }
 }
 
 /// 選用的 `kinds`:要收的推播種類，存成 JSON 字串;沒帶回 null(新配對預設只收 blocked,既有配對保留原偏好)。
@@ -241,7 +252,10 @@ function isHostServiceEvent(value: string): value is HostServiceEvent {
 }
 
 async function findPairing(env: Env, keyHash: string): Promise<Pairing | null> {
-  return env.DB.prepare("SELECT member_id, device_token, environment, kinds FROM push_pairings WHERE key_hash = ?")
+  return env.DB.prepare(
+    `SELECT p.member_id, d.push_token AS device_token, d.push_environment AS environment, p.kinds
+     FROM push_pairings p JOIN devices d ON d.id = p.device_id WHERE p.key_hash = ?`,
+  )
     .bind(keyHash)
     .first<Pairing>();
 }

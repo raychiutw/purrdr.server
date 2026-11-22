@@ -178,7 +178,7 @@ describe("App Store Server Notifications v2", () => {
     const response = await sendNotification({ notificationType: "SUBSCRIBED", transaction: { appAccountToken: null } });
 
     expect(response.status).toBe(200);
-    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM entitlements").first("count")).toBe(0);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM subscriptions").first("count")).toBe(0);
   });
 
   it("帳單寬限期的時間過了，沒收到通知也停用", async () => {
@@ -346,7 +346,7 @@ describe("訂閱歸屬", () => {
     const again = await submitTransaction(me.accessToken, { appAccountToken: me.id });
 
     expect(again.status).toBe(200);
-    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM entitlements").first("count")).toBe(1);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM subscriptions").first("count")).toBe(1);
   });
 
   it("沒登入不能提交或查詢", async () => {

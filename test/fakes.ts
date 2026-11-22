@@ -256,3 +256,28 @@ export async function signInWithGoogle(subject: string, extra: Partial<IdTokenOp
     body: { provider: "google", idToken: await googleIdToken({ subject, nonce, ...extra }), nonce },
   });
 }
+
+/// 直接寫入一組(舊式)推播配對,繞過 API:用在測試「配對已存在、但會員訂閱已到期」之類 API 建不出來的狀態。
+/// 沒帶 `deviceId` 的比照 0009 遷移,以 `token:<device token>` 當 devices.id(對外會是 `legacy-<雜湊>`)。
+export async function insertPairing(options: {
+  keyHash: string;
+  memberId: string;
+  deviceToken: string;
+  deviceId?: string;
+  kinds?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}): Promise<void> {
+  const createdAt = options.createdAt ?? 0;
+  const deviceId = options.deviceId ?? `token:${options.deviceToken}`;
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO devices (id, member_id, platform, push_token, push_environment, created_at, last_seen_at)
+       VALUES (?, ?, 'ios', ?, 'production', ?, ?)
+       ON CONFLICT (id) DO UPDATE SET push_token = excluded.push_token`,
+    ).bind(deviceId, options.memberId, options.deviceToken, createdAt, createdAt),
+    env.DB.prepare(
+      `INSERT INTO push_pairings (id, member_id, device_id, key_hash, kinds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(crypto.randomUUID(), options.memberId, deviceId, options.keyHash, options.kinds ?? '["blocked"]', createdAt, options.updatedAt ?? createdAt),
+  ]);
+}

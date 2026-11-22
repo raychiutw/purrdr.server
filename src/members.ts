@@ -32,22 +32,37 @@ export async function memberIdFor(env: Env, identity: { provider: Provider; subj
   return row?.member_id ?? null;
 }
 
+function insertIdentityStatement(env: Env, memberId: string, identity: VerifiedIdentity, sealedToken: string | null, now: number): D1PreparedStatement {
+  return env.DB.prepare(
+    `INSERT INTO identities (id, member_id, provider, subject, email, email_verified, is_private_relay, apple_refresh_token, linked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(),
+    memberId,
+    identity.provider,
+    identity.subject,
+    identity.email,
+    identity.emailVerified ? 1 : 0,
+    identity.isPrivateRelay ? 1 : 0,
+    sealedToken,
+    now,
+  );
+}
+
 /// 用這個登入身分建立新會員。
 export async function createMember(env: Env, identity: VerifiedIdentity, appleRefreshToken: string | null): Promise<string> {
   const id = crypto.randomUUID();
   const now = Date.now();
   await env.DB.batch([
     env.DB.prepare("INSERT INTO members (id, created_at) VALUES (?, ?)").bind(id, now),
-    env.DB.prepare(
-      "INSERT INTO identities (provider, subject, member_id, email, apple_refresh_token, linked_at) VALUES (?, ?, ?, ?, ?, ?)",
-    ).bind(identity.provider, identity.subject, id, identity.email, await sealedAppleToken(env, identity, appleRefreshToken), now),
+    insertIdentityStatement(env, id, identity, await sealedAppleToken(env, identity, appleRefreshToken), now),
   ]);
   return id;
 }
 
 /// 會員擁有這些資料時就不是「空的」:連結衝突時不能被自動併入(ADR-0007)。
 /// 之後新增的會員資料表若也該擋合併，加進這個清單(推播配對要有訂閱才存在，所以不必列)。
-const DATA_BLOCKING_MERGE = ["entitlements", "synced_hosts"] as const;
+const DATA_BLOCKING_MERGE = ["subscriptions", "synced_hosts"] as const;
 const NO_BLOCKING_DATA = DATA_BLOCKING_MERGE.map((table) => `NOT EXISTS (SELECT 1 FROM ${table} WHERE member_id = ?)`).join(" AND ");
 
 export async function hasDataBlockingMerge(env: Env, memberId: string): Promise<boolean> {
@@ -74,11 +89,7 @@ export async function identitiesOf(env: Env, memberId: string): Promise<StoredId
 
 /// 把登入身分加到會員身上。
 export async function addIdentity(env: Env, memberId: string, identity: VerifiedIdentity, appleRefreshToken: string | null): Promise<void> {
-  await env.DB.prepare(
-    "INSERT INTO identities (provider, subject, member_id, email, apple_refresh_token, linked_at) VALUES (?, ?, ?, ?, ?, ?)",
-  )
-    .bind(identity.provider, identity.subject, memberId, identity.email, await sealedAppleToken(env, identity, appleRefreshToken), Date.now())
-    .run();
+  await insertIdentityStatement(env, memberId, identity, await sealedAppleToken(env, identity, appleRefreshToken), Date.now()).run();
 }
 
 /// 把另一個空會員的這個登入身分移過來，並刪掉那個會員(連同它其餘的身分與權杖)。
@@ -94,9 +105,21 @@ export async function absorbIdentity(
   const otherIsEmpty = DATA_BLOCKING_MERGE.map(() => otherMemberId);
   const [moved] = await env.DB.batch([
     env.DB.prepare(
-      `UPDATE identities SET member_id = ?, email = COALESCE(?, email), apple_refresh_token = COALESCE(?, apple_refresh_token), linked_at = ?
+      `UPDATE identities SET member_id = ?, email = COALESCE(?, email), email_verified = ?, is_private_relay = ?,
+         apple_refresh_token = COALESCE(?, apple_refresh_token), linked_at = ?
        WHERE provider = ? AND subject = ? AND member_id = ? AND ${NO_BLOCKING_DATA}`,
-    ).bind(memberId, identity.email, await sealedAppleToken(env, identity, appleRefreshToken), Date.now(), identity.provider, identity.subject, otherMemberId, ...otherIsEmpty),
+    ).bind(
+      memberId,
+      identity.email,
+      identity.emailVerified ? 1 : 0,
+      identity.isPrivateRelay ? 1 : 0,
+      await sealedAppleToken(env, identity, appleRefreshToken),
+      Date.now(),
+      identity.provider,
+      identity.subject,
+      otherMemberId,
+      ...otherIsEmpty,
+    ),
     env.DB.prepare(
       `DELETE FROM members WHERE id = ? AND ${NO_BLOCKING_DATA}
        AND NOT EXISTS (SELECT 1 FROM identities WHERE provider = ? AND subject = ? AND member_id = ?)`,
@@ -117,8 +140,16 @@ export async function deleteMember(env: Env, memberId: string): Promise<void> {
 /// 既有身分再次登入：更新 email 與(有的話)新的 Apple refresh token。
 export async function refreshIdentity(env: Env, identity: VerifiedIdentity, appleRefreshToken: string | null): Promise<void> {
   await env.DB.prepare(
-    "UPDATE identities SET email = COALESCE(?, email), apple_refresh_token = COALESCE(?, apple_refresh_token) WHERE provider = ? AND subject = ?",
+    `UPDATE identities SET email = COALESCE(?, email), email_verified = ?, is_private_relay = ?,
+       apple_refresh_token = COALESCE(?, apple_refresh_token) WHERE provider = ? AND subject = ?`,
   )
-    .bind(identity.email, await sealedAppleToken(env, identity, appleRefreshToken), identity.provider, identity.subject)
+    .bind(
+      identity.email,
+      identity.emailVerified ? 1 : 0,
+      identity.isPrivateRelay ? 1 : 0,
+      await sealedAppleToken(env, identity, appleRefreshToken),
+      identity.provider,
+      identity.subject,
+    )
     .run();
 }

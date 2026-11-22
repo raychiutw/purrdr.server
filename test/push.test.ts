@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { DAY, submitTransaction } from "./app-store";
-import { api, identityProviders, signInWithApple } from "./fakes";
+import { api, identityProviders, insertPairing, signInWithApple } from "./fakes";
 
 /// 推播(#29、ADR-0004):app 註冊推播配對(只送配對密鑰的雜湊),主機外掛帶密鑰呼叫 /v1/push,
 /// 後台確認會員有有效訂閱後轉給 APNs(這裡是 test/fakes.ts 的假 APNs 端點)。
@@ -102,7 +102,8 @@ describe("註冊推播配對", () => {
     expect(again.status).toBe(201);
     const rows = await pairingRows();
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.device_token).toBe("b2".repeat(32));
+    const device = await env.DB.prepare("SELECT push_token FROM devices WHERE id = ?").bind(rows[0]!.device_id).first<{ push_token: string }>();
+    expect(device?.push_token).toBe("b2".repeat(32));
   });
 
   it("密鑰雜湊已屬於另一個會員時拒絕(409 pairing_in_use)", async () => {
@@ -234,12 +235,7 @@ describe("主機外掛送推播", () => {
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
     const key = pairingKey();
-    await env.DB.prepare(
-      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, created_at, updated_at)
-       VALUES (?, ?, 'apns', ?, 'production', 0, 0)`,
-    )
-      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
-      .run();
+    await insertPairing({ keyHash: await hashOf(key), memberId: me.id, deviceToken: DEVICE_TOKEN });
 
     const sent = await push(blocked(key));
 
@@ -403,12 +399,7 @@ describe("Agent 完成(done)與種類偏好", () => {
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
     const key = pairingKey();
-    await env.DB.prepare(
-      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, kinds, created_at, updated_at)
-       VALUES (?, ?, 'apns', ?, 'production', '["blocked","done"]', 0, 0)`,
-    )
-      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
-      .run();
+    await insertPairing({ keyHash: await hashOf(key), memberId: me.id, deviceToken: DEVICE_TOKEN, kinds: '["blocked","done"]' });
 
     const sent = await push(done(key));
 
@@ -552,12 +543,7 @@ describe("Agent 可能卡住(stuck)與仍在等你(reminder)", () => {
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
     const key = pairingKey();
-    await env.DB.prepare(
-      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, kinds, created_at, updated_at)
-       VALUES (?, ?, 'apns', ?, 'production', '["stuck","reminder"]', 0, 0)`,
-    )
-      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
-      .run();
+    await insertPairing({ keyHash: await hashOf(key), memberId: me.id, deviceToken: DEVICE_TOKEN, kinds: '["stuck","reminder"]' });
 
     for (const body of [stuck(key), reminder(key)]) {
       const sent = await push(body);
@@ -742,12 +728,7 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
     const key = pairingKey();
-    await env.DB.prepare(
-      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, kinds, created_at, updated_at)
-       VALUES (?, ?, 'apns', ?, 'production', '["host_service"]', 0, 0)`,
-    )
-      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
-      .run();
+    await insertPairing({ keyHash: await hashOf(key), memberId: me.id, deviceToken: DEVICE_TOKEN, kinds: '["host_service"]' });
 
     const sent = await push(hostEvent(key, "host_service_update_available"));
 
@@ -1022,12 +1003,7 @@ describe("測試通知(event: test,#19)", () => {
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
     const key = pairingKey();
-    await env.DB.prepare(
-      `INSERT INTO push_pairings (key_hash, member_id, platform, device_token, environment, created_at, updated_at)
-       VALUES (?, ?, 'apns', ?, 'production', 0, 0)`,
-    )
-      .bind(await hashOf(key), me.id, DEVICE_TOKEN)
-      .run();
+    await insertPairing({ keyHash: await hashOf(key), memberId: me.id, deviceToken: DEVICE_TOKEN });
 
     const sent = await push(testEvent(key));
 
