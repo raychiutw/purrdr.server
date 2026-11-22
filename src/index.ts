@@ -177,8 +177,10 @@ async function verifiedCredential(
 ///
 /// 新身分的 email 已驗證且非私密轉寄、另一個會員有相同的已驗證 email(不分大小寫)時,歸到那個會員並新增這個身分
 /// (`autoLinked: true`);規則見 `autoMergeTarget`。選填 `deviceId`(app Keychain 的 UUID)與 `platform`(ios|android,預設 ios)。
+/// 選填 `createMember`(布林,預設 true):帶 false 是「只登入」,查無會員(含沒有可自動合併的對象)時回 404 `member_not_found`、不建立任何資料。
 async function signIn(request: Request, env: Env): Promise<Response> {
   const body = await readJson(request);
+  const mayCreateMember = parseCreateMember(body.createMember);
   const deviceId = parseDeviceId(body.deviceId);
   const platform = parsePlatform(body.platform);
   const { identity, appleRefreshToken } = await verifiedCredential(env, body);
@@ -190,6 +192,9 @@ async function signIn(request: Request, env: Env): Promise<Response> {
   } else {
     const target = await autoMergeTarget(env, identity);
     if (target === null) {
+      if (!mayCreateMember) {
+        throw new ApiError(404, "member_not_found", "No member for this account. Join first.");
+      }
       memberId = await createMember(env, identity, appleRefreshToken);
       memberCreated = true;
     } else {
@@ -200,6 +205,17 @@ async function signIn(request: Request, env: Env): Promise<Response> {
   }
   const tokens = await issueTokens(env, memberId, deviceId, platform);
   return json({ ...tokens, memberCreated, autoLinked, member: await memberView(env, memberId) });
+}
+
+/// 登入 body 選填的 `createMember`:沒帶(或 undefined)視為 true;不是布林 400。
+function parseCreateMember(value: unknown): boolean {
+  if (value === undefined) {
+    return true;
+  }
+  if (typeof value !== "boolean") {
+    throw new ApiError(400, "invalid_request", "createMember must be a boolean.");
+  }
+  return value;
 }
 
 /// 連結與確認合併共用:驗證憑證(不換 Apple authorization code,確定要做才換),回傳這個身分目前屬於誰。

@@ -231,3 +231,32 @@ describe("遷移來的舊裝置(devices.id = token:<device token>)", () => {
     expect((await api("GET", "/v1/members/me/push-devices", { accessToken: me.accessToken })).body.devices).toEqual([]);
   });
 });
+
+describe("訂閱回應的 pendingReview(#409 回報的契約落差)", () => {
+  async function plusMember() {
+    const signIn = await signInWithApple("apple-1");
+    const me = { accessToken: signIn.body.accessToken as string, id: signIn.body.member.id as string };
+    await submitTransaction(me.accessToken, { appAccountToken: me.id });
+    return me;
+  }
+
+  it("一般訂閱 pendingReview 為 false", async () => {
+    const me = await plusMember();
+    const response = await api("GET", "/v1/members/me/subscription", { accessToken: me.accessToken });
+    expect(response.body.subscription.pendingReview).toBe(false);
+  });
+
+  it("遷移合併留下待處理的訂閱(pending_review = 1)回 pendingReview: true,其餘欄位照常", async () => {
+    const me = await plusMember();
+    await env.DB.prepare("UPDATE subscriptions SET pending_review = 1").run();
+    const response = await api("GET", "/v1/members/me/subscription", { accessToken: me.accessToken });
+    expect(response.body.subscription).toMatchObject({ pendingReview: true, status: "active", store: "app_store" });
+  });
+
+  it("訂閱的 status 只會是 active、in_grace_period、expired、revoked;重試中(billing_retry)對外是 expired", async () => {
+    const me = await plusMember();
+    await env.DB.prepare("UPDATE subscriptions SET status = 'billing_retry', expires_at = ?").bind(Date.now() - DAY).run();
+    const response = await api("GET", "/v1/members/me/subscription", { accessToken: me.accessToken });
+    expect(response.body.subscription.status).toBe("expired");
+  });
+});
