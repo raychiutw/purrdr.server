@@ -33,6 +33,8 @@ export type SubscriptionView = {
   willAutoRenew: boolean | null;
   /** 遷移合併留下的「待處理」訂閱(`pending_review = 1`,不佔有效訂閱名額);app 帳號頁提示使用者處理。 */
   pendingReview: boolean;
+  /** 帳單重試期:到期後 Apple 仍在嘗試扣款(資料庫狀態 `billing_retry`,未撤銷)。`status` 是 `expired`、沒有 Plus 權限,但訂閱還可能扣款成功而復活。 */
+  billingRetry: boolean;
 };
 
 export type StoredStatus = "active" | "grace" | "billing_retry" | "expired" | "revoked" | "refunded";
@@ -89,6 +91,7 @@ export async function subscriptionView(env: Env, memberId: string, now = Date.no
     gracePeriodExpiresAt: best.row.grace_expires_at === null ? null : new Date(best.row.grace_expires_at).toISOString(),
     willAutoRenew: best.row.auto_renew === null ? null : best.row.auto_renew === 1,
     pendingReview: best.row.pending_review === 1,
+    billingRetry: best.row.status === "billing_retry" && best.row.revoked_at === null && best.status === "expired",
   };
 }
 

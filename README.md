@@ -59,7 +59,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 
 `member` 的形狀:`{ id, identities: [{ provider, email, linkedAt }] }`(email 可能是 Apple private relay,也可能是 `null`)。
 
-`subscription` 的形狀:`{ status, store, productId, expiresAt, gracePeriodExpiresAt, willAutoRenew, pendingReview }`。`status` 依到期與撤銷時間推算,只會是 `active`、`in_grace_period`(扣款失敗、Apple 重試中，仍有權限)、`expired`、`revoked`(退款或撤銷);資料庫記的 `billing_retry`(寬限期結束、Apple 仍在重試,沒有權限)對外是 `expired`,不會回 `billing_retry`;`pendingReview` 是遷移合併留下的待處理標記(`true` 時帳號頁提示使用者處理);`store` 是 `app_store`／`google_play`;`willAutoRenew` 在還沒收過續訂資訊時是 `null`。會員有多個訂閱時回有效的那個，其次是最晚到期的。
+`subscription` 的形狀:`{ status, store, productId, expiresAt, gracePeriodExpiresAt, willAutoRenew, pendingReview, billingRetry }`。`status` 依到期與撤銷時間推算,只會是 `active`、`in_grace_period`(扣款失敗、Apple 重試中，仍有權限)、`expired`、`revoked`(退款或撤銷);資料庫記的 `billing_retry`(寬限期結束、Apple 仍在重試,沒有權限)對外是 `expired`、沒有 Plus 權限,另以 `billingRetry: true` 標示(到期後 Apple 仍在嘗試扣款,成功的話訂閱會復活;app 刪除會員前要警告使用者取消訂閱,同「仍會扣款」);不會回 `billing_retry`;`pendingReview` 是遷移合併留下的待處理標記(`true` 時帳號頁提示使用者處理);`store` 是 `app_store`／`google_play`;`willAutoRenew` 在還沒收過續訂資訊時是 `null`。會員有多個訂閱時回有效的那個，其次是最晚到期的。
 
 `changes` 的每一筆是修改(新增也是)`{ id, name, address, port, username, connectionMethod, hostKeyFingerprint, modifiedAt }`
 或刪除 `{ id, deleted: true }`;回應的 `hosts` 每一筆是同樣的修改形狀，依 `id` 排序。`id` 是 app 產生的 UUID(後台一律回小寫);
