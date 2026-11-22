@@ -302,7 +302,7 @@ token 已屬於另一個會員回 409 `subscription_in_use`(`details` 同 #25:�
 5. RTDN:Google Cloud Pub/Sub 建 topic,把 `google-play-developer-notifications@system.gserviceaccount.com` 設為該 topic 的 **Pub/Sub Publisher**。
 6. 建 **push subscription**:endpoint `https://<後台網址>/v1/google-play/notifications`、啟用 authentication(OIDC),選一個服務帳戶(它的 email 填 `GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`)、**audience 填同一個通知網址**(同時填 `GOOGLE_PLAY_PUBSUB_AUDIENCE`)。Pub/Sub 服務代理(`service-<專案編號>@gcp-sa-pubsub.iam.gserviceaccount.com`)要有該服務帳戶的 **Service Account Token Creator** 角色。使用 wrapped 格式(預設)。
 7. Play Console → 營利 → 營利設定 → Real-time developer notifications:填 topic 名稱 `projects/<專案>/topics/<topic>`,選「訂閱與撤銷」類通知,按 **Send test message** 確認後台回 200。
-8. 新 secret 與 vars 清單:secret `GOOGLE_PLAY_SERVICE_ACCOUNT_KEY`(列在 `secrets.required`);vars `GOOGLE_PLAY_PACKAGE_NAME`、`GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PRODUCT_IDS`、`GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PUBSUB_AUDIENCE`(識別碼,可進 repo;目前除商品 ID 外是 `REPLACE_ME`)。
+8. 新 secret 與 vars 清單:secret `GOOGLE_PLAY_SERVICE_ACCOUNT_KEY`(選用,不在 `secrets.required`;Android 上線前可不設,型別宣告在 `src/env.d.ts`);vars `GOOGLE_PLAY_PACKAGE_NAME`、`GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PRODUCT_IDS`、`GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PUBSUB_AUDIENCE`(識別碼,可進 repo;目前除商品 ID 外是 `REPLACE_ME`)。
 Android app 購買時要把會員 ID 放進 `obfuscatedAccountId`(對應 App Store 的 `appAccountToken`),後台用它擋下被別人領走的購買。
 
 
@@ -328,7 +328,7 @@ Android app 購買時要把會員 ID 放進 `obfuscatedAccountId`(對應 App Sto
 | App Store Server Notifications | App Store Connect → App 資訊 → App Store 伺服器通知 | 兩個環境各設一次(Apple 允許同一個網址,後台依 `data.environment` 區分):App Store Connect → 我的 App → App 資訊 → App Store 伺服器通知,<br>1. **Production 伺服器網址**填 `https://<後台網址>/v1/app-store/notifications`,版本選 **Version 2**;<br>2. **Sandbox 伺服器網址**填同一個網址,版本選 **Version 2**;<br>3. 填好後用 App Store Server API 的「Request a Test Notification」確認(回 TEST 通知,後台回 200)。通知來源 IP 是 `17.0.0.0/8`;後台回 200 才算收到,非 2xx 時 Production 會重送(Sandbox 不重送) |
 | App Store Server API 金鑰 Key ID 與 Issuer ID | `wrangler.jsonc` 的 `APP_STORE_API_KEY_ID`、`APP_STORE_API_ISSUER_ID`(目前是 `REPLACE_ME`) | App Store Connect → 使用者與存取權限 → 整合 → App 內購買項目 → 產生金鑰;Key ID 在金鑰列表、Issuer ID 在頁面上方。不是 secret,可進 repo(公開 repo 只放識別碼) |
 | Google Play 串接 | `wrangler.jsonc` 的 `GOOGLE_PLAY_*` 與 secret `GOOGLE_PLAY_SERVICE_ACCOUNT_KEY` | 步驟見「Google Play 串接」的設定步驟;金鑰沒設定時綁定回 502 `store_unavailable`、通知回 503 |
-| App Store Server API 私鑰 | secret `APP_STORE_API_KEY` | 上一步下載的 `.p8` 全文(只能下載一次):`npx wrangler secret put APP_STORE_API_KEY < SubscriptionKey_XXXX.p8`。這把是 In-App Purchase 金鑰,跟 APNs、Sign in with Apple 的金鑰不同;列在 `secrets.required`,沒設定 wrangler 不會讓你部署;萬一缺或失效,綁定不查證(記 `lookup_unreachable`),不影響購買 |
+| App Store Server API 私鑰 | secret `APP_STORE_API_KEY` | 上一步下載的 `.p8` 全文(只能下載一次):`npx wrangler secret put APP_STORE_API_KEY < SubscriptionKey_XXXX.p8`。這把是 In-App Purchase 金鑰,跟 APNs、Sign in with Apple 的金鑰不同;選用(不在 `secrets.required`,可先不設就部署,型別宣告在 `src/env.d.ts`);缺或失效,綁定不查證(記 `lookup_unreachable`),不影響購買 |
 | APNs 驗證金鑰 Key ID | `wrangler.jsonc` 的 `APNS_KEY_ID` | Apple Developer → Keys,建立啟用 Apple Push Notifications service (APNs) 的金鑰(環境選 Sandbox & Production);Team ID 沿用 `APPLE_TEAM_ID` |
 | APNs 私鑰 | secret `APNS_PRIVATE_KEY` | 上一步下載的 `.p8` 全文:`npx wrangler secret put APNS_PRIVATE_KEY < AuthKey_XXXX.p8` |
 | App ID 開推播 | Apple Developer → Identifiers | `com.raychiu.purrdr` 勾選 Push Notifications 與 Time Sensitive Notifications(app 的 entitlement 已加 `aps-environment` 與 time-sensitive) |

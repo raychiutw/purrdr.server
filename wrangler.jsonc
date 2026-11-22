@@ -56,7 +56,7 @@
   //   ACCESS_TOKEN_SECRET  簽存取權杖(HS256)的隨機密鑰，至少 32 bytes
   //   APNS_PRIVATE_KEY     APNs 驗證金鑰 .p8 的 PEM 全文(PKCS#8)
   //   APPLE_TOKEN_ENCRYPTION_KEY  加密 Sign in with Apple refresh token 的 AES-GCM 金鑰(base64 的 32 bytes)
-  //   APP_STORE_API_KEY    App Store Server API 的 In-App Purchase 金鑰 .p8 的 PEM 全文(PKCS#8)
-  //   GOOGLE_PLAY_SERVICE_ACCOUNT_KEY  Google Play Developer API 服務帳戶金鑰:下載的 JSON 金鑰檔全文(或只放 private_key 的 PEM)
-  "secrets": { "required": ["APPLE_PRIVATE_KEY", "ACCESS_TOKEN_SECRET", "APNS_PRIVATE_KEY", "APPLE_TOKEN_ENCRYPTION_KEY", "APP_STORE_API_KEY", "GOOGLE_PLAY_SERVICE_ACCOUNT_KEY"] }
+  //   (選用)APP_STORE_API_KEY    沒設時 App Store Server API 查證回 502;型別宣告在 src/env.d.ts。App Store Server API 的 In-App Purchase 金鑰 .p8 的 PEM 全文(PKCS#8)
+  //   (選用)GOOGLE_PLAY_SERVICE_ACCOUNT_KEY  Android 上線前可不設;型別宣告在 src/env.d.ts。Google Play Developer API 服務帳戶金鑰:下載的 JSON 金鑰檔全文(或只放 private_key 的 PEM)
+  "secrets": { "required": ["APPLE_PRIVATE_KEY", "ACCESS_TOKEN_SECRET", "APNS_PRIVATE_KEY", "APPLE_TOKEN_ENCRYPTION_KEY"] }
 }
