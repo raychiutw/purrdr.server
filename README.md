@@ -302,7 +302,7 @@ token 已屬於另一個會員回 409 `subscription_in_use`(`details` 同 #25:�
 5. RTDN:Google Cloud Pub/Sub 建 topic,把 `google-play-developer-notifications@system.gserviceaccount.com` 設為該 topic 的 **Pub/Sub Publisher**。
 6. 建 **push subscription**:endpoint `https://<後台網址>/v1/google-play/notifications`、啟用 authentication(OIDC),選一個服務帳戶(它的 email 填 `GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`)、**audience 填同一個通知網址**(同時填 `GOOGLE_PLAY_PUBSUB_AUDIENCE`)。Pub/Sub 服務代理(`service-<專案編號>@gcp-sa-pubsub.iam.gserviceaccount.com`)要有該服務帳戶的 **Service Account Token Creator** 角色。使用 wrapped 格式(預設)。
 7. Play Console → 營利 → 營利設定 → Real-time developer notifications:填 topic 名稱 `projects/<專案>/topics/<topic>`,選「訂閱與撤銷」類通知,按 **Send test message** 確認後台回 200。
-8. 新 secret 與 vars 清單:secret `GOOGLE_PLAY_SERVICE_ACCOUNT_KEY`(列在 `secrets.required`);vars `GOOGLE_PLAY_PACKAGE_NAME`、`GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PRODUCT_IDS`、`GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PUBSUB_AUDIENCE`(識別碼,可進 repo;目前除商品 ID 外是 `REPLACE_ME`)。
+8. 新 secret 與 vars 清單:secret `GOOGLE_PLAY_SERVICE_ACCOUNT_KEY`(選用,不在 `secrets.required`;Android 上線前可不設,型別宣告在 `src/env.d.ts`);vars `GOOGLE_PLAY_PACKAGE_NAME`、`GOOGLE_PLAY_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PRODUCT_IDS`、`GOOGLE_PLAY_PUBSUB_SERVICE_ACCOUNT_EMAIL`、`GOOGLE_PLAY_PUBSUB_AUDIENCE`(識別碼,可進 repo;目前除商品 ID 外是 `REPLACE_ME`)。
 Android app 購買時要把會員 ID 放進 `obfuscatedAccountId`(對應 App Store 的 `appAccountToken`),後台用它擋下被別人領走的購買。
 
 
