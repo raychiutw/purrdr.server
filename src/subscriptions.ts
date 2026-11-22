@@ -40,6 +40,7 @@ type Row = {
   pending_review: number;
   store: "app_store" | "google_play";
   member_id: string;
+  external_id: string;
   product_id: string;
   current_transaction_id: string | null;
   purchased_at: number | null;
