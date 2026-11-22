@@ -1,4 +1,5 @@
 import { importPKCS8, SignJWT } from "jose";
+import { sha256Hex } from "./identity";
 import { ApiError, readJson, requireString } from "./http";
 import { legacyDeviceId, readDeviceIdentity } from "./push-devices";
 import { hasActiveSubscription, requireActiveSubscription } from "./subscriptions";
@@ -16,12 +17,13 @@ const DEVICE_TOKEN = /^[0-9a-f]{64,200}$/;
 const PANE_ID = /^[A-Za-z0-9:_.-]{1,64}$/;
 const ENVIRONMENTS = new Set(["production", "sandbox"]);
 /// 外掛可以送的欄位;其他一律拒絕。
-const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane"]);
+const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane", "tab"]);
 /// 主機服務事件可以送的欄位;與上面的狀態形狀互斥。
 const HOST_SERVICE_PUSH_FIELDS = new Set(["key", "event", "version"]);
 /// 測試通知(#19):配對密鑰、事件名與選填的主機名稱，不收 version、pane 等任何其他欄位。
 const TEST_PUSH_FIELDS = new Set(["key", "event", "host_name"]);
 const MAX_HOST_NAME_LENGTH = 64;
+const MAX_TAB_LENGTH = 100;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const MAX_VERSION_LENGTH = 64;
 /// 配對可以選擇要收的推播種類(`host_service` = 主機服務事件;`stuck`、`reminder` 見 purrdr.server#15)。
@@ -138,7 +140,7 @@ export async function revokePairing(env: Env, memberId: string, keyHash: string)
 
 type PushStatus = "blocked" | "done" | "stuck" | "reminder";
 type HostServiceEvent = "host_service_update_available" | "host_service_updated" | "host_service_update_rolled_back";
-type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null };
+type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null; tab: string | null };
 type HostServicePush = { kind: "host_service"; key: string; event: HostServiceEvent; version: string | null };
 /// 使用者在 app 帳號頁按「傳送測試通知」:不是配對的推播種類，不受偏好、去重影響。
 type TestPush = { kind: "test"; key: string; hostName: string | null };
@@ -193,26 +195,26 @@ function readStatusPush(fields: Record<string, unknown>): StatusPush {
   if (pane !== null && (typeof pane !== "string" || !PANE_ID.test(pane))) {
     throw invalid("pane must be a herdr pane id.");
   }
-  return { kind: "status", key, workspace, status, pane };
+  return { kind: "status", key, workspace, status, pane, tab: readOptionalLabel(fields.tab, "tab", MAX_TAB_LENGTH) };
 }
 
 function readTestPush(fields: Record<string, unknown>): TestPush {
   const key = readPushKey(fields, TEST_PUSH_FIELDS);
-  return { kind: "test", key, hostName: readHostName(fields.host_name) };
+  return { kind: "test", key, hostName: readOptionalLabel(fields.host_name, "host_name", MAX_HOST_NAME_LENGTH) };
 }
 
-/// 選填的主機名稱，只用在測試通知的標題:控制字元(含換行、跳格、Unicode 行／段分隔符)換成空白後修掉頭尾，
-/// 剩下空的當成沒帶;最長 64 個字元(以 code point 計)。不是字串或太長回 400。
-function readHostName(value: unknown): string | null {
+/// 選填的顯示名稱(測試通知的 `host_name`、推播標題的 `tab`):控制字元(含換行、跳格、Unicode 行／段分隔符)換成空白後修掉頭尾，
+/// 剩下空的當成沒帶;最長 `max` 個字元(以 code point 計)。不是字串或太長回 400。
+function readOptionalLabel(value: unknown, field: string, max: number): string | null {
   if (value === undefined) {
     return null;
   }
   if (typeof value !== "string") {
-    throw invalid("host_name must be a string.");
+    throw invalid(`${field} must be a string.`);
   }
   const cleaned = value.replace(/[\p{Cc}\u2028\u2029]+/gu, " ").trim();
-  if ([...cleaned].length > MAX_HOST_NAME_LENGTH) {
-    throw invalid("host_name is too long.");
+  if ([...cleaned].length > max) {
+    throw invalid(`${field} is too long.`);
   }
   return cleaned === "" ? null : cleaned;
 }
@@ -312,7 +314,7 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     throw new ApiError(429, "rate_limited", "Too many notifications. Try again in a minute.");
   }
 
-  const response = await deliverToApns(env, pairing, apnsPayload(push, keyHash));
+  const response = await deliverToApns(env, pairing, await apnsPayload(push, keyHash));
   if (response.ok) {
     return true;
   }
@@ -368,7 +370,7 @@ const STATUS_ALERTS: Record<PushStatus, { locKey: string; category: string; inte
 
 /// APNs payload 由後台組：標題是 workspace 名稱，內文依狀態固定。
 /// 根層的 `pairing`(配對密鑰雜湊)與 `pane` 給 app 點通知時找主機與 Agent。
-export function apnsPayload(push: PushRequest, keyHash: string): Record<string, unknown> {
+export async function apnsPayload(push: PushRequest, keyHash: string): Promise<Record<string, unknown>> {
   if (push.kind === "host_service") {
     return hostServicePayload(push, keyHash);
   }
@@ -378,7 +380,10 @@ export function apnsPayload(push: PushRequest, keyHash: string): Record<string, 
   const alert = STATUS_ALERTS[push.status];
   return {
     aps: {
-      alert: { title: push.workspace, "loc-key": alert.locKey },
+      alert: { title: push.tab === null ? push.workspace : `${push.workspace} · ${push.tab}`, "loc-key": alert.locKey },
+      // 讓 app 的 Notification Service Extension 能改寫通知;同一配對同一 workspace 的通知疊在一起(不含主機名稱與 tab)。
+      "mutable-content": 1,
+      "thread-id": await sha256Hex(`${keyHash}\n${push.workspace}`),
       sound: "default",
       "interruption-level": alert.interruptionLevel,
       // app 為各類別設了隱藏預覽時的通用文字(HIG:hiddenPreviewsBodyPlaceholder)。
@@ -402,6 +407,7 @@ function testPayload(push: TestPush, keyHash: string): Record<string, unknown> {
       alert: { ...title, "loc-key": "This is a test. When an agent needs your reply or finishes, you'll get a notice like this." },
       sound: "default",
       "interruption-level": "active",
+      "mutable-content": 1,
     },
     pairing: keyHash,
     event: "test",
@@ -422,6 +428,7 @@ function hostServicePayload(push: HostServicePush, keyHash: string): Record<stri
     aps: {
       alert: { "title-loc-key": "Host service", "loc-key": alert.locKey, ...(alert.withVersion ? { "loc-args": [push.version] } : {}) },
       "interruption-level": "passive",
+      "mutable-content": 1,
       category: "HOST_SERVICE_EVENT",
     },
     pairing: keyHash,
