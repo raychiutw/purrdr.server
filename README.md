@@ -37,6 +37,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `DELETE /v1/members/me` | 存取權杖 | 刪除會員。回 204 |
 | `GET /v1/members/me/subscription` | 存取權杖 | 回 `{ subscription }`;從沒訂閱過是 `null` |
 | `POST /v1/members/me/subscription/app-store` | 存取權杖 | 提交 StoreKit 2 交易。body `{ signedTransaction }`(`VerificationResult.jwsRepresentation`)。回 `{ subscription }`;訂閱屬於其他會員回 409 `subscription_in_use`,帶 `error.details`,見下方「訂閱綁定與 App Store 串接」 |
+| `POST /v1/members/me/subscription/transfer` | 存取權杖 | 把屬於其他會員的 App Store 訂閱轉給目前會員。body `{ signedTransaction }`。回 `{ subscription, appAccountTokenUpdated }`,見「訂閱轉移」 |
 | `POST /v1/members/me/hosts/sync` | 存取權杖 | 主機同步(要有效的 Purrdr Plus)。body `{ changes: [...] }`,回 `{ hosts: [...], deletedHostIds: [...] }`,見下方「主機同步」 |
 | `POST /v1/members/me/push-pairings` | 存取權杖 | 註冊推播配對(需要有效訂閱)。body `{ keyHash, platform: "apns", deviceToken, environment: "production"\|"sandbox", deviceId?, deviceName?, model?, kinds? }`;`kinds` 是要收的推播種類(`blocked`、`done`、`stuck`、`reminder`、`host_service` 的陣列),新配對沒帶時只收 `blocked`。同一個 `keyHash` 再送一次是更新(APNs token 輪替、改偏好;沒帶 `kinds` 保留原本的偏好)。裝置欄位見下方「通知裝置」。回 201 |
 | `DELETE /v1/members/me/push-pairings/{keyHash}` | 存取權杖 | 撤銷推播配對(只刪自己的、不存在也算成功、不需要訂閱)。回 204 |
@@ -93,6 +94,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 400 | `invalid_transaction` | 交易簽章驗不過，或不是這個 app、不是 Purrdr Plus、環境不是 Production／Sandbox(StoreKit 設定檔的交易一律驗不過) |
 | 400 | `invalid_notification` | App Store 通知簽章驗不過，或 bundle id、環境(`data.environment` 與交易的 `environment` 不一致也算)、app Apple ID 不對 |
 | 403 | `subscription_required` | 需要有效的 Purrdr Plus(主機同步、註冊推播配對、送推播) |
+| 404 | `subscription_not_found` | 轉移的訂閱沒登記在任何會員 |
 | 404 | `pairing_not_found` | 送推播的配對密鑰沒有註冊(或已撤銷) |
 | 409 | `pairing_in_use` | 這個配對密鑰雜湊已屬於另一個會員 |
 | 410 | `pairing_revoked` | APNs 說 device token 已失效(`Unregistered`、`BadDeviceToken`、`DeviceTokenNotForTopic`);配對已刪除 |
@@ -104,6 +106,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 409 | `no_merge_needed` | 確認合併時身分沒有屬於任何會員,或本來就是自己的 |
 | 409 | `subscription_in_use` | 這個 App Store 訂閱已屬於另一個會員;`error.details` 是 `{ ownerEmail, canTransfer }`(見「訂閱綁定與 App Store 串接」) |
 | 409 | `subscription_already_active` | 這個會員已有另一個有效訂閱(一個會員同時最多一個:有效 = 生效中、帳單寬限期、帳單重試期);換訂閱要等原訂閱不再有效 |
+| 409 | `subscription_already_owned` | 轉移的訂閱已屬於目前會員 |
 | 409 | `last_identity` | 解除最後一種登入方式 |
 | 502 | `provider_unavailable` | 連不上 Apple／Google |
 | 502 | `apple_revoke_failed` | 刪除會員時撤銷 Sign in with Apple 權杖失敗;資料沒有刪，請稍後重試 |
@@ -113,7 +116,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 **屬於其他會員**:提交的交易(或其 `appAccountToken`)屬於另一個會員時回
 `409 { error: { code: "subscription_in_use", message, details: { ownerEmail, canTransfer } } }`。
 `ownerEmail` 是擁有者任一登入身分的遮蔽 email(`maskEmail`,例如 `r***@example.com`;擁有者沒有 email 時是 `null`),不回對方的會員 ID。
-`canTransfer` 是提交的會員自己沒有佔著有效訂閱名額(生效中、帳單寬限期、帳單重試期;一會員一訂閱),供訂閱轉移(#27)判斷;轉移本身不在 #25。
+`canTransfer` 是提交的會員自己沒有佔著有效訂閱名額(生效中、帳單寬限期、帳單重試期;一會員一訂閱),供訂閱轉移(#27,見下方「訂閱轉移」)判斷。
 
 **事件稽核**(`subscription_events`):app 提交的交易記 `client` / `transaction_submitted`;通知記 `store_notification`,`type` 是
 `<notificationType>` 或 `<notificationType>.<subtype>`,`notification_uuid` 唯一。
@@ -131,8 +134,35 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 - 查得到:以 Apple 回報的最新交易、續訂資訊與狀態為準,記 `store_api` / `status_checked`。
 - **查不到或 Apple 不可達都不擋購買**:提交的簽章交易本身已驗過 Apple 憑證鏈,所以以簽章交易為準。Apple 查無此訂閱(404)記 `lookup_not_found`;
   沒設定金鑰、連不上、逾時(5 秒)、429、5xx、或 JWT 被拒(401,查 secret 與 Key ID／Issuer ID)記 `lookup_unreachable`。之後的通知或下一次提交會補上 Apple 的狀態。
-- `setAppAccountToken(env, originalTransactionId, memberId, environment)`(`PUT /inApps/v1/transactions/{id}/appAccountToken`)已備好給 #27 的訂閱轉移,
-  **目前沒有任何 API 呼叫它**。Apple 拒絕丟 `AppStoreApiError`(帶 `errorCode`),暫時不可用丟 `AppStoreApiUnavailable`(可重試)。
+- `setAppAccountToken(env, originalTransactionId, memberId, environment)`(`PUT /inApps/v1/transactions/{id}/appAccountToken`)由訂閱轉移(#27)呼叫。Apple 拒絕丟 `AppStoreApiError`(帶 `errorCode`),暫時不可用丟 `AppStoreApiUnavailable`(可重試)。
+
+### 訂閱轉移(#27)
+
+`POST /v1/members/me/subscription/transfer`,body `{ signedTransaction }`:app 提交 StoreKit 簽章交易(`VerificationResult.jwsRepresentation`),證明目前裝置的 Apple ID 擁有該訂閱。
+後台驗章(與綁定相同:憑證鏈、bundle id、環境、商品),找到該 original transaction 目前所屬的另一個會員,改歸目前會員。**Face ID 驗證是 app 端的責任,後台不處理。**
+
+成功回 `200 { subscription, appAccountTokenUpdated }`:`subscription` 是目前會員的新訂閱(形狀同 `GET /v1/members/me/subscription`);
+`appAccountTokenUpdated` 表示之後的續訂是否已讓 Apple 歸新會員。
+
+| 狀態 | `error.code` | 情境 |
+|---|---|---|
+| 400 | `invalid_transaction` | 簽章交易驗不過 |
+| 404 | `subscription_not_found` | 這個訂閱沒登記在任何會員(不是轉移,走一般綁定 `POST .../subscription/app-store`) |
+| 409 | `subscription_already_owned` | 訂閱已屬於目前會員 |
+| 409 | `subscription_already_active` | 目前會員已佔著有效訂閱名額(生效中、帳單寬限期、帳單重試期);什麼都沒動 |
+
+**一個 D1 batch(原子)**:改 `subscriptions.member_id`、寫 `subscription_transfers`、寫 `subscription_events`(`client` / `transferred`)、
+撤銷原會員的推播配對(寫 `revoked_push_pairings` 並刪 `push_pairings`,主機外掛之後送推播收 410 `pairing_revoked`,做法同遠端關閉裝置)。
+原會員若還有別的有效訂閱則不撤銷配對。原會員的 Plus 因訂閱不再屬於它而**立即失效**,主機同步因 `requireActiveSubscription` 回 403 `subscription_required`。
+
+**Set App Account Token**:batch 之後呼叫 `setAppAccountToken`(`appAccountToken` = 新會員 ID),讓之後續訂的交易歸新會員。
+**失敗不回滾轉移**(Apple 不可達是常態):記 `subscription_events`(`store_api` / `set_app_account_token_failed`),回應 `appAccountTokenUpdated: false`;成功記 `app_account_token_set`。
+後台目前沒有自動重試;`appAccountTokenUpdated: false` 時,續訂通知仍帶舊的 `appAccountToken`,但通知處理**一律先查 `external_id` 的登記歸屬**,
+所以訂閱仍屬新會員,不會被舊 token 拉回原會員。
+
+**邊角:重試中的舊訂閱被新購買讓位後才續訂成功**:會員購買新的 original transaction 時,舊的 `billing_retry` 訂閱會被標成 `expired` 讓位;
+之後舊訂閱的 `DID_RENEW` 若撞上「一會員一個有效訂閱」的唯一索引,通知不再回 409(Apple 會一直重送),改記 `store_notification` / `slot_conflict_ignored` 並回 200,
+舊訂閱維持 `expired`、新訂閱不受影響。代價:使用者其實同時付了兩筆訂閱的錢,需由使用者在 Apple 取消其中一個(或之後把其中一個轉移給另一個會員)。
 
 ### 規則
 

@@ -16,7 +16,7 @@ import { syncHosts } from "./host-sync";
 import { mergeMembers, mergeSummary } from "./merge";
 import { registerPairing, revokePairing, sendPush } from "./push";
 import { listDevices, renameDevice, revokeDevice } from "./push-devices";
-import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
+import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView, transferSubscription } from "./subscriptions";
 import {
   authenticate,
   authenticateSession,
@@ -117,6 +117,11 @@ async function route(request: Request, env: Env): Promise<Response> {
       const memberId = await authenticate(env, request);
       const signedTransaction = requireString(await readJson(request), "signedTransaction");
       return json({ subscription: await submitAppStoreTransaction(env, memberId, signedTransaction) });
+    }
+    case "POST /v1/members/me/subscription/transfer": {
+      const memberId = await authenticate(env, request);
+      const signedTransaction = requireString(await readJson(request), "signedTransaction");
+      return json(await transferSubscription(env, memberId, signedTransaction));
     }
     case "POST /v1/members/me/hosts/sync":
       return json(await syncHosts(env, await authenticate(env, request), request));

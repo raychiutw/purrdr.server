@@ -5,7 +5,7 @@ import {
   type RenewalInfoPayload,
   type TransactionPayload,
 } from "./app-store";
-import { getSubscriptionStatus, AppStoreApiUnavailable, type AppStoreEnvironment } from "./app-store-api";
+import { getSubscriptionStatus, setAppAccountToken, AppStoreApiError, AppStoreApiUnavailable, type AppStoreEnvironment } from "./app-store-api";
 import { ApiError } from "./http";
 import { maskEmail } from "./mask-email";
 
@@ -304,6 +304,90 @@ export async function submitAppStoreTransaction(env: Env, memberId: string, sign
   return subscriptionView(env, memberId);
 }
 
+/// 遠端關閉紀錄保留 90 天(與 push-devices 相同);轉移時順手清掉過期的。
+const REVOKED_PAIRING_RETENTION_MS = 90 * 24 * 60 * 60_000;
+
+export type TransferResult = {
+  subscription: SubscriptionView | null;
+  /** 之後的續訂是否已經讓 Apple 歸新會員(Set App Account Token 成功)。false 時轉移仍成立,見 README。 */
+  appAccountTokenUpdated: boolean;
+};
+
+/// POST /v1/members/me/subscription/transfer(purrdr.server#27):app 提交簽章交易(證明目前裝置的 Apple ID 擁有該訂閱),
+/// 後台把這個 original transaction 從目前所屬的另一個會員轉給目前會員。Face ID 驗證是 app 端的責任。
+///
+/// - 目前會員已佔著有效訂閱名額(生效中、帳單寬限期、帳單重試期)→ 409 `subscription_already_active`。
+/// - 訂閱沒登記在任何會員 → 404 `subscription_not_found`(app 該走一般綁定);已屬於自己 → 409 `subscription_already_owned`。
+/// - 改歸屬、轉移紀錄、`transferred` 事件、原會員的推播配對撤銷在同一個 D1 batch(原子)。
+///   原會員若沒有別的有效訂閱,它的推播配對全部撤銷(主機外掛之後收 410);主機同步因 `requireActiveSubscription` 自然停止。
+/// - batch 之後才呼叫 Set App Account Token;失敗(Apple 不可達是常態)不回滾轉移,記 `set_app_account_token_failed`,
+///   回應帶 `appAccountTokenUpdated: false`。
+export async function transferSubscription(env: Env, memberId: string, signedTransaction: string): Promise<TransferResult> {
+  const transaction = await verifiedTransaction(env, signedTransaction);
+  const row = await env.DB.prepare("SELECT id, member_id, environment FROM subscriptions WHERE store = 'app_store' AND external_id = ?")
+    .bind(transaction.originalTransactionId)
+    .first<{ id: string; member_id: string; environment: "sandbox" | "production" }>();
+  if (row === null) {
+    throw new ApiError(404, "subscription_not_found", "This App Store subscription isn't registered to any Purrdr member.");
+  }
+  if (row.member_id === memberId) {
+    throw new ApiError(409, "subscription_already_owned", "This App Store subscription already belongs to you.");
+  }
+  if (await holdsLiveSlot(env, memberId)) {
+    throw new ApiError(409, "subscription_already_active", "This member already has an active subscription.");
+  }
+  const now = Date.now();
+  const fromMember = row.member_id;
+  const fromKeepsPlus = (await rowsOf(env, fromMember)).some((other) => other.external_id !== transaction.originalTransactionId && isActive(statusOf(other, now)));
+  const moved = "EXISTS (SELECT 1 FROM subscriptions WHERE id = ?1 AND member_id = ?2)";
+  try {
+    await env.DB.batch([
+      env.DB.prepare("UPDATE subscriptions SET member_id = ?2, updated_at = ?3 WHERE id = ?1 AND member_id = ?4").bind(row.id, memberId, now, fromMember),
+      env.DB.prepare(
+        `INSERT INTO subscription_transfers (id, subscription_id, from_member, to_member, transferred_at)
+         SELECT ?3, ?1, ?4, ?2, ?5 WHERE ${moved}`,
+      ).bind(row.id, memberId, crypto.randomUUID(), fromMember, now),
+      env.DB.prepare(
+        `INSERT INTO subscription_events (id, subscription_id, source, type, notification_uuid, received_at)
+         SELECT ?3, ?1, 'client', 'transferred', NULL, ?4 WHERE ${moved}`,
+      ).bind(row.id, memberId, crypto.randomUUID(), now),
+      env.DB.prepare("DELETE FROM revoked_push_pairings WHERE revoked_at < ?").bind(now - REVOKED_PAIRING_RETENTION_MS),
+      ...(fromKeepsPlus
+        ? []
+        : [
+            env.DB.prepare(
+              `INSERT OR REPLACE INTO revoked_push_pairings (key_hash, member_id, revoked_at)
+               SELECT key_hash, member_id, ?3 FROM push_pairings WHERE member_id = ?4 AND ${moved}`,
+            ).bind(row.id, memberId, now, fromMember),
+            env.DB.prepare(`DELETE FROM push_pairings WHERE member_id = ?3 AND ${moved}`).bind(row.id, memberId, fromMember),
+          ]),
+    ]);
+  } catch (error) {
+    if (error instanceof Error && ONE_LIVE_SUBSCRIPTION.test(error.message)) {
+      throw new ApiError(409, "subscription_already_active", "This member already has an active subscription.");
+    }
+    throw error;
+  }
+  if ((await ownerOf(env, transaction.originalTransactionId)) !== memberId) {
+    // 競態:另一個請求先把訂閱轉走了。
+    throw new ApiError(409, "subscription_in_use", "This App Store subscription belongs to another Purrdr member.");
+  }
+
+  const environment: AppStoreEnvironment = row.environment === "production" ? "Production" : "Sandbox";
+  let appAccountTokenUpdated = false;
+  try {
+    await setAppAccountToken(env, transaction.originalTransactionId, memberId, environment);
+    appAccountTokenUpdated = true;
+    await recordEvent(env, transaction.originalTransactionId, "store_api", "app_account_token_set");
+  } catch (error) {
+    if (!(error instanceof AppStoreApiError || error instanceof AppStoreApiUnavailable)) {
+      throw error;
+    }
+    await recordEvent(env, transaction.originalTransactionId, "store_api", "set_app_account_token_failed");
+  }
+  return { subscription: await subscriptionView(env, memberId), appAccountTokenUpdated };
+}
+
 /// 「屬於其他會員」回應的 `error.details`,給 app 顯示與 #27 的轉移用:
 /// `ownerEmail` 是擁有者任一身分的遮蔽 email(沒有就是 null),不回會員 ID;
 /// `canTransfer` 是提交的會員自己沒有佔著有效訂閱名額(一會員一訂閱,有的話轉移會被擋下)。
@@ -414,7 +498,17 @@ export async function handleAppStoreNotification(env: Env, signedPayload: string
     return;
   }
 
-  await applyTransaction(env, owner, transaction);
+  try {
+    await applyTransaction(env, owner, transaction);
+  } catch (error) {
+    // 會員已另有佔名額的訂閱(例如重試中的舊訂閱因購買新訂閱被標成 expired,之後舊訂閱才續訂成功):
+    // 回 409 只會讓 Apple 一直重送,記一筆事件後回 200。
+    if (error instanceof ApiError && error.code === "subscription_already_active") {
+      await recordEvent(env, transaction.originalTransactionId, "store_notification", "slot_conflict_ignored", notificationUUID);
+      return;
+    }
+    throw error;
+  }
   if (data.signedRenewalInfo) {
     await applyRenewalInfo(env, data.signedRenewalInfo, transaction.originalTransactionId);
   }
