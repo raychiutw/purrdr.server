@@ -260,3 +260,44 @@ describe("訂閱回應的 pendingReview(#409 回報的契約落差)", () => {
     expect(response.body.subscription.status).toBe("expired");
   });
 });
+
+describe("訂閱回應的 billingRetry(帳單重試期,Apple 仍在嘗試扣款)", () => {
+  async function plusMember() {
+    const signIn = await signInWithApple("apple-1");
+    const me = { accessToken: signIn.body.accessToken as string, id: signIn.body.member.id as string };
+    await submitTransaction(me.accessToken, { appAccountToken: me.id });
+    return me;
+  }
+
+  async function subscription(me: { accessToken: string }) {
+    return (await api("GET", "/v1/members/me/subscription", { accessToken: me.accessToken })).body.subscription;
+  }
+
+  it("一般有效訂閱 billingRetry 為 false", async () => {
+    expect((await subscription(await plusMember())).billingRetry).toBe(false);
+  });
+
+  it("資料庫狀態是 billing_retry:billingRetry 為 true,status 仍是 expired(沒有 Plus 權限)", async () => {
+    const me = await plusMember();
+    await env.DB.prepare("UPDATE subscriptions SET status = 'billing_retry', expires_at = ?").bind(Date.now() - DAY).run();
+
+    expect(await subscription(me)).toMatchObject({ status: "expired", billingRetry: true });
+    const sync = await api("POST", "/v1/members/me/hosts/sync", { accessToken: me.accessToken, body: { changes: [] } });
+    expect(sync.status).toBe(403);
+    expect(sync.body.error.code).toBe("subscription_required");
+  });
+
+  it("已撤銷或退款的訂閱不算重試期", async () => {
+    const me = await plusMember();
+    await env.DB.prepare("UPDATE subscriptions SET status = 'billing_retry', expires_at = ?, revoked_at = ?").bind(Date.now() - DAY, Date.now()).run();
+
+    expect(await subscription(me)).toMatchObject({ status: "revoked", billingRetry: false });
+  });
+
+  it("已到期且不在重試的訂閱 billingRetry 為 false", async () => {
+    const me = await plusMember();
+    await env.DB.prepare("UPDATE subscriptions SET status = 'expired', expires_at = ?").bind(Date.now() - DAY).run();
+
+    expect(await subscription(me)).toMatchObject({ status: "expired", billingRetry: false });
+  });
+});
