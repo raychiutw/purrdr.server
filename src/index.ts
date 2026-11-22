@@ -17,7 +17,16 @@ import { syncHosts } from "./host-sync";
 import { registerPairing, revokePairing, sendPush } from "./push";
 import { listDevices, renameDevice, revokeDevice } from "./push-devices";
 import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView } from "./subscriptions";
-import { authenticate, issueTokens, revokeRefreshToken, rotateRefreshToken } from "./tokens";
+import {
+  authenticate,
+  authenticateSession,
+  issueTokens,
+  listSessions,
+  parseDeviceId,
+  revokeOtherSession,
+  revokeRefreshToken,
+  rotateRefreshToken,
+} from "./tokens";
 
 /// Purrdr 後台(ADR-0004、ADR-0007)。API 一覽見 README.md。
 export default {
@@ -69,7 +78,17 @@ async function route(request: Request, env: Env): Promise<Response> {
     const memberId = await authenticate(env, request);
     return json({ device: await renameDevice(env, memberId, decodeURIComponent(devicePath[2]!), request, url.searchParams.get("currentDeviceId")) });
   }
+  const sessionPath = /^DELETE \/v1\/members\/me\/sessions\/([^/]+)$/.exec(key);
+  if (sessionPath) {
+    const { memberId, sessionId } = await authenticateSession(env, request);
+    await revokeOtherSession(env, memberId, sessionId, decodeURIComponent(sessionPath[1]!));
+    return new Response(null, { status: 204 });
+  }
   switch (key) {
+    case "GET /v1/members/me/sessions": {
+      const { memberId, sessionId } = await authenticateSession(env, request);
+      return json({ sessions: await listSessions(env, memberId, sessionId) });
+    }
     case "POST /v1/sessions":
       return signIn(request, env);
     case "POST /v1/sessions/refresh": {
@@ -127,9 +146,11 @@ async function verifiedCredential(
   return { identity, appleRefreshToken };
 }
 
-/// POST /v1/sessions:用 Apple 或 Google 登入;沒有會員就建立一個。
+/// POST /v1/sessions:用 Apple 或 Google 登入;沒有會員就建立一個。選填 `deviceId`(app Keychain 的 UUID)。
 async function signIn(request: Request, env: Env): Promise<Response> {
-  const { identity, appleRefreshToken } = await verifiedCredential(env, await readJson(request));
+  const body = await readJson(request);
+  const deviceId = parseDeviceId(body.deviceId);
+  const { identity, appleRefreshToken } = await verifiedCredential(env, body);
   let memberId = await memberIdFor(env, identity);
   const memberCreated = memberId === null;
   if (memberId === null) {
@@ -137,7 +158,7 @@ async function signIn(request: Request, env: Env): Promise<Response> {
   } else {
     await refreshIdentity(env, identity, appleRefreshToken);
   }
-  const tokens = await issueTokens(env, memberId);
+  const tokens = await issueTokens(env, memberId, deviceId);
   return json({ ...tokens, memberCreated, member: await memberView(env, memberId) });
 }
 

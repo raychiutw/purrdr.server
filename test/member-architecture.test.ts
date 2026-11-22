@@ -57,7 +57,7 @@ describe("工作階段(sessions)", () => {
     expect(device).toEqual({ member_id: signIn.body.member.id });
   });
 
-  it("換權杖沿用同一個工作階段:新雜湊換掉舊的(舊的記在 previous),舊權杖立即失效", async () => {
+  it("換權杖沿用同一個工作階段:新雜湊換掉舊的(舊的記在 previous),舊權杖寬限後失效", async () => {
     const signIn = await signInWithApple("apple-1");
     const [before] = await sessionRows();
 
@@ -71,6 +71,8 @@ describe("工作階段(sessions)", () => {
     expect(after[0]!.refresh_token_hash).not.toBe(before!.refresh_token_hash);
     expect(after[0]!.rotated_at).toBeGreaterThan(0);
 
+    // 60 秒寬限內舊權杖還換得到(見 test/sessions.test.ts);寬限過了才失效。
+    await env.DB.prepare("UPDATE sessions SET grace_until = 0").run();
     const reused = await api("POST", "/v1/sessions/refresh", { body: { refreshToken: signIn.body.refreshToken } });
     expect(reused.status).toBe(401);
     expect(reused.body.error.code).toBe("invalid_refresh_token");
