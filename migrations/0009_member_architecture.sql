@@ -10,7 +10,7 @@
 -- (@privaterelay.appleid.com)不參與合併。新登入之後一律記下 token 裡真正的 email_verified。
 --
 -- 冪等與回滾:wrangler 以 d1_migrations 記錄套用過的 migration,同一個 migration 只會跑一次,重複執行 `migrations apply`
--- 不會再動資料。這個 migration 不能整段重跑(舊資料表已改名、搬完就刪),回滾靠 D1 Time Travel,見 README「0009 遷移」。
+-- 不會再動資料。這個 migration 不能整段重跑(舊資料表已改名、搬完就刪),回滾靠 D1 Time Travel,見 docs/backend.md「0009 遷移」。
 --
 -- 時間一律 Unix epoch 毫秒。新增的會員資料表一律 REFERENCES members(id) ON DELETE CASCADE。
 

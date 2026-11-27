@@ -328,7 +328,7 @@ const REVOKED_PAIRING_RETENTION_MS = 90 * 24 * 60 * 60_000;
 
 export type TransferResult = {
   subscription: SubscriptionView | null;
-  /** 之後的續訂是否已經讓 Apple 歸新會員(Set App Account Token 成功)。false 時轉移仍成立,見 README。 */
+  /** 之後的續訂是否已經讓 Apple 歸新會員(Set App Account Token 成功)。false 時轉移仍成立,見 docs/backend.md。 */
   appAccountTokenUpdated: boolean;
 };
 
