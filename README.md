@@ -30,7 +30,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `POST /v1/sessions/revoke` | — | 登出。body `{ refreshToken }`,回 204 |
 | `GET /v1/members/me/sessions` | 存取權杖 | 列出自己未撤銷、未過期的工作階段(每裝置一個)。回 `{ sessions: [{ id, deviceId, deviceName, deviceModel, createdAt, lastActiveAt, expiresAt, current }] }`;`current` 是發出這個存取權杖的工作階段;`deviceName`／`deviceModel` 沒有時為 `null`;時間為 ISO 8601。存取權杖所屬的工作階段已撤銷也回 401 |
 | `DELETE /v1/members/me/sessions/{id}` | 存取權杖 | 撤銷自己另一支裝置的工作階段(app 要求 Face ID 後才呼叫)。回 204;已撤銷的再撤銷也回 204(冪等);`id` 不存在或屬於別的會員 404 `session_not_found`;是目前這個工作階段 409 `cannot_revoke_current_session`(登出用 `POST /v1/sessions/revoke`)。被撤銷那支裝置的更新權杖立即失效,它已發出的存取權杖最多再活 15 分鐘(只有上面兩支工作階段 API 會即時拒絕) |
-| `GET /v1/members/me` | 存取權杖 | 回 `{ member }` |
+| `GET /v1/members/me` | 存取權杖 | 回 `{ member }`。`member.pushUsage`(#36)是今日推播用量 `{ limit, sent, resetsAt }`:`limit` 今日上限(會員欄位 `daily_push_limit`,空值是預設 100)、`sent` 今日(UTC)已送到 APNs 的則數、`resetsAt` 下次歸零的時間(下一個 UTC 0:00,ISO 8601)。登入、更新權杖、連結／合併身分回的 `member` 也帶同一個欄位 |
 | `POST /v1/members/me/identities` | 存取權杖 | 連結另一種登入方式。body 同登入。回 `{ member, mergedMemberId: null }`;身分已屬於另一個會員時**不合併**,回 409 `merge_required`,`error.details` 是合併確認用的摘要(見下方「合併確認」) |
 | `POST /v1/members/me/identities/merge` | 存取權杖 | 確認合併。body 同連結(要重新帶憑證)。回 `{ member, mergedMemberId, accessToken, accessTokenExpiresAt }` |
 | `DELETE /v1/members/me/identities/{apple\|google}` | 存取權杖 | 解除連結。回 `{ member }` |
@@ -40,7 +40,7 @@ npm run types       # 改了 wrangler.jsonc 之後重新產生 worker-configurat
 | `POST /v1/members/me/subscription/google-play` | 存取權杖 | Android app 提交 Google Play 購買。body `{ purchaseToken, productId }`。後台向 Google 查證後寫入訂閱,回 `{ subscription }`(`store: "google_play"`)。商品不在白名單或 Google 查不到回 400 `invalid_purchase`;Google 連不上回 502 `store_unavailable`;token 屬於其他會員回 409 `subscription_in_use`(同 App Store,帶 `error.details`);會員已有另一個有效訂閱(任一商店)回 409 `subscription_already_active`。見下方「Google Play 串接」 |
 | `POST /v1/members/me/subscription/transfer` | 存取權杖 | 把屬於其他會員的 App Store 訂閱轉給目前會員。body `{ signedTransaction }`。回 `{ subscription, appAccountTokenUpdated }`,見「訂閱轉移」 |
 | `POST /v1/members/me/hosts/sync` | 存取權杖 | 主機同步(要有效的 Purrdr Plus)。body `{ changes: [...] }`,回 `{ hosts: [...], deletedHostIds: [...] }`,見下方「主機同步」 |
-| `POST /v1/members/me/push-pairings` | 存取權杖 | 註冊推播配對(需要有效訂閱)。body `{ keyHash, platform: "apns", deviceToken, environment: "production"\|"sandbox", deviceId?, deviceName?, model?, kinds? }`;`kinds` 是要收的推播種類(`blocked`、`done`、`stuck`、`reminder`、`host_service` 的陣列),新配對沒帶時只收 `blocked`。同一個 `keyHash` 再送一次是更新(APNs token 輪替、改偏好;沒帶 `kinds` 保留原本的偏好)。裝置欄位見下方「通知裝置」。回 201 |
+| `POST /v1/members/me/push-pairings` | 存取權杖 | 註冊推播配對(不需要 Plus,#36)。body `{ keyHash, platform: "apns", deviceToken, environment: "production"\|"sandbox", deviceId?, deviceName?, model?, kinds? }`;`kinds` 是要收的推播種類(`blocked`、`done`、`stuck`、`reminder`、`host_service` 的陣列),新配對沒帶時只收 `blocked`。同一個 `keyHash` 再送一次是更新(APNs token 輪替、改偏好;沒帶 `kinds` 保留原本的偏好)。裝置欄位見下方「通知裝置」。回 201 |
 | `DELETE /v1/members/me/push-pairings/{keyHash}` | 存取權杖 | 撤銷推播配對(只刪自己的、不存在也算成功、不需要訂閱)。回 204 |
 | `GET /v1/members/me/push-devices?currentDeviceId=` | 存取權杖 | 會收到通知的裝置(不需要訂閱：到期後仍要能看到並關閉遺失的裝置)。回 `{ devices: [{ deviceId, name, model, hostCount, lastRegisteredAt, current }] }`,見下方「通知裝置」 |
 | `PATCH /v1/members/me/push-devices/{deviceId}?currentDeviceId=` | 存取權杖 | 裝置改名(需要有效訂閱)。body `{ name }`,回 `{ device }`;不是自己的或沒有配對回 404 `device_not_found` |
@@ -98,13 +98,14 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 400 | `invalid_purchase` | Google Play 購買驗不過:商品不在白名單(或與 Google 回的不一致)、Google 查無此 purchase token |
 | 401 | `invalid_notification` | Google Play 通知的 OIDC token 驗不過(簽章、iss、aud、exp、email、email_verified) |
 | 502／503 | `store_unavailable` | 暫時問不到 Google Play(綁定回 502、通知回 503 讓 Pub/Sub 重送):沒設定、金鑰或服務帳戶授權有問題、連不上、逾時、429、5xx |
-| 403 | `subscription_required` | 需要有效的 Purrdr Plus(主機同步、註冊推播配對、送推播) |
+| 403 | `subscription_required` | 需要有效的 Purrdr Plus(主機同步、裝置改名;推播從 #36 起不再需要) |
 | 404 | `subscription_not_found` | 轉移的訂閱沒登記在任何會員 |
 | 404 | `pairing_not_found` | 送推播的配對密鑰沒有註冊(或已撤銷) |
 | 409 | `pairing_in_use` | 這個配對密鑰雜湊已屬於另一個會員 |
 | 410 | `pairing_revoked` | APNs 說 device token 已失效(`Unregistered`、`BadDeviceToken`、`DeviceTokenNotForTopic`);配對已刪除 |
 | 413 | `invalid_request` | 推播請求 body 超過 2 KB |
 | 429 | `rate_limited` | 同一個 IP(`CF-Connecting-IP`)60 秒內超過 60 次(帶 `Retry-After` 秒數;App Store 通知不限流),或推播的這組配對密鑰一分鐘內超過 10 則 |
+| 429 | `daily_limit_reached` | 這個會員今天(UTC)的推播已達每日上限(預設 100,會員欄位 `daily_push_limit` 可調);帶 `Retry-After`(到下一個 UTC 0:00 的秒數)。UTC 0:00 後恢復 |
 | 502 | `apns_failed` | APNs 拒絕或連不上(配對保留) |
 | 409 | `merge_required` | 連結時身分屬於另一個會員;`error.details` 是合併摘要,確認後改呼叫 `POST /v1/members/me/identities/merge` |
 | 409 | `subscription_conflict` | 確認合併時兩邊都有有效訂閱(一個會員只能有一個);什麼都沒動,要先讓其中一邊不再有效 |
@@ -194,8 +195,8 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 - **訂閱權限**(ADR-0007):app 購買時以 `appAccountToken` 帶入會員 ID;交易與通知都只信任 App Store 簽的 JWS:`x5c` 三張憑證、最上層與 `APPLE_ROOT_CERTIFICATES` 逐位元組相同、逐層簽章正確、中繼與葉帶 Apple 的 OID、在 `signedDate` 時都在有效期間、JWS 是 ES256 由葉憑證簽(與 App Store Server Library 相同，不做線上 OCSP)。另外檢查 bundle id、環境(Production 與 Sandbox 都收：App Review 與 TestFlight 是 Sandbox)、商品、正式環境通知的 app Apple ID。
 - **訂閱歸屬**:一個 App Store 訂閱(original transaction)只屬於一個會員。已登記的只屬於原會員;`appAccountToken` 是另一個現有會員時不能被領走(409 `subscription_in_use`);沒有 `appAccountToken`(在 App Store 兌換 Offer Code)或原會員已刪除時，歸提交的會員。
 - **通知**:不依通知類型個別處理，而是寫入通知裡的交易與續訂資訊：續訂帶新的到期時間、到期的時間已過、退款與撤銷帶 `revocationDate`、撤銷被取消時不帶。較晚購買的交易取代舊的;同一筆交易只接受簽章時間不早於現有的;續訂資訊也依簽章時間，晚到的舊通知不會蓋掉新狀態。沒登記且 `appAccountToken` 不是現有會員的訂閱略過(回 200)。
-- **權限判定**:沒有 `revoked_at`,且到期時間或帳單寬限期還沒過(讀取時依時間推算;`subscriptions.status` 是寫入當下的快照,寫入新訂閱前會先把這個會員已到期的有效列改成 `expired`)。推播與主機同步用 `src/subscriptions.ts` 的 `hasActiveSubscription`／`requireActiveSubscription`(403 `subscription_required`)。
-- **推播**(ADR-0004、#29):app 產生 32 bytes 配對密鑰(64 位小寫 hex),只把那 32 bytes 的 SHA-256(小寫 hex)交給後台;密鑰本身只在 app 與主機的 `~/.purrdr/push-<裝置>/pairing`。主機外掛送推播時帶密鑰，後台算雜湊找配對 → 會員要有有效訂閱 → 種類要在配對的 `kinds` 偏好內(否則回 `{ delivered: false }`,不呼叫 APNs)→ 主機服務事件去重 → 每組密鑰每分鐘 10 則(只計真的要送 APNs 的，偏好或去重擋下的不計，避免擠掉「需要你」;速率限制、訂閱檢查與 410 對所有種類一致)→ 由後台自己組 APNs payload(標題 = workspace 名稱,有帶 `tab` 時是「workspace · Tab」;`aps` 另有 `mutable-content: 1`(app 的 Notification Service Extension 可改寫)與 `thread-id` = SHA-256(配對雜湊 + 換行 + workspace),同一配對同一 workspace 的通知疊在一起,不含主機名稱與 tab;主機服務事件與測試通知也帶 `mutable-content: 1`,但沒有 `thread-id`;根層 `pairing`(雜湊)、`pane`、`status`;`category` 讓 app 設定隱藏預覽時的通用文字):
+- **權限判定**:沒有 `revoked_at`,且到期時間或帳單寬限期還沒過(讀取時依時間推算;`subscriptions.status` 是寫入當下的快照,寫入新訂閱前會先把這個會員已到期的有效列改成 `expired`)。主機同步與裝置改名用 `src/subscriptions.ts` 的 `requireActiveSubscription`(403 `subscription_required`);推播從 #36 起不看訂閱,改成每個會員每日上限。
+- **推播**(ADR-0004、#29):app 產生 32 bytes 配對密鑰(64 位小寫 hex),只把那 32 bytes 的 SHA-256(小寫 hex)交給後台;密鑰本身只在 app 與主機的 `~/.purrdr/push-<裝置>/pairing`。主機外掛送推播時帶密鑰，後台算雜湊找配對(不需要 Plus) → 種類要在配對的 `kinds` 偏好內(否則回 `{ delivered: false }`,不呼叫 APNs)→ 主機服務事件去重 → 每組密鑰每分鐘 10 則(只計真的要送 APNs 的，偏好或去重擋下的不計，避免擠掉「需要你」;速率限制與 410 對所有種類一致)→ 每會員每個 UTC 日上限(#36,見下方「每日上限」)→ 由後台自己組 APNs payload(標題 = workspace 名稱,有帶 `tab` 時是「workspace · Tab」;`aps` 另有 `mutable-content: 1`(app 的 Notification Service Extension 可改寫)與 `thread-id` = SHA-256(配對雜湊 + 換行 + workspace),同一配對同一 workspace 的通知疊在一起,不含主機名稱與 tab;主機服務事件與測試通知也帶 `mutable-content: 1`,但沒有 `thread-id`;根層 `pairing`(雜湊)、`pane`、`status`;`category` 讓 app 設定隱藏預覽時的通用文字):
   - `blocked`(需要你):`loc-key` 「An agent needs you.」、`interruption-level: time-sensitive`、`category: AGENT_BLOCKED`。
   - `done`(完成):`loc-key` 「An agent finished.」、`interruption-level: active`、`category: AGENT_DONE`。
   - `stuck`(可能卡住,purrdr.server#15):`loc-key` 「An agent may be stuck.」、`interruption-level: active`、`category: AGENT_STUCK`。
@@ -207,7 +208,10 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
     - `host_service_updated`:「Host service updated to %@.」,`loc-args: [version]`(這個事件必須帶 `version`)
     - `host_service_update_rolled_back`:「Host service update failed and was rolled back.」
 
-  - 測試通知(purrdr.server#19,不是配對的種類，沒有對應的 `kinds`):app 帳號頁按「傳送測試通知」，HTTPS 主機由主機服務的 `push.test` 代送，SSH 主機由 app 經 SSH 在主機上直接 POST,都送 `{ key, event: "test", host_name? }`(不收 `version`、`pane` 或其他欄位)。內容像「需要你」但說明是測試:有 `host_name` 時 `title-loc-key` 「Test: %@ needs you」、`title-loc-args: [host_name]`,沒有時 `title-loc-key` 「Test: Purrdr needs you」(無參數);內文 `loc-key` 「This is a test. When an agent needs your reply or finishes, you'll get a notice like this.」;`sound: default`、`interruption-level: active`(與真正的「需要你」一致),**沒有 `category`**,根層只有 `pairing` 與 `event: "test"`(沒有 `pane`／`status`),點擊只開 app。主機名稱只用在這則通知的標題，不存。不看配對的 `kinds`、不去重(使用者每次按都該收到);仍要有效訂閱(403 `subscription_required`),與狀態推播共用每組密鑰每分鐘 10 則(429 `rate_limited`);配對不存在 404 `pairing_not_found`、已遠端關閉或 APNs 回 410 回 410 `pairing_revoked`、APNs 其他錯誤 502 `apns_failed`。
+  - **每日上限**(purrdr.server#36):每個會員每個 UTC 日最多 100 則(`members.daily_push_limit` 有值時以它為準,空值 = 預設 100;營運者直接改欄位調整)。只算真的送到 APNs 而且成功的推播,**測試通知算**;種類偏好、主機服務事件 24 小時去重擋下的、每分鐘限速擋下的、APNs 失敗的都不算。計數是單一原子 UPSERT(`push_daily_usage`),先預留一則、APNs 沒收下再還回去,同時到的請求不會超過上限。
+    - 第 N 則(N = 上限)送出後,後台接著送**一則「今日已達上限」通知**到觸發的那支裝置:不計數、同一會員每天只送一次、送不到也不影響剛送出的那則。payload:`aps.alert` = `title-loc-key`「Daily notification limit reached」、`loc-key`「You've reached today's limit of %@ notifications. They'll resume at 00:00 UTC.」、`loc-args: [上限]`(字串);`sound: default`、`interruption-level: active`、`mutable-content: 1`,沒有 `category`、`pane`、`status`;根層 `pairing`(配對雜湊)與 `event: "daily_limit_reached"`。
+    - 之後當天的推播回 429 `daily_limit_reached`(帶 `Retry-After`,不呼叫 APNs、主機服務事件的去重登記一併還回),UTC 0:00 後恢復。今日用量見 `GET /v1/members/me` 的 `member.pushUsage`。
+  - 測試通知(purrdr.server#19,不是配對的種類，沒有對應的 `kinds`):app 帳號頁按「傳送測試通知」，HTTPS 主機由主機服務的 `push.test` 代送，SSH 主機由 app 經 SSH 在主機上直接 POST,都送 `{ key, event: "test", host_name? }`(不收 `version`、`pane` 或其他欄位)。內容像「需要你」但說明是測試:有 `host_name` 時 `title-loc-key` 「Test: %@ needs you」、`title-loc-args: [host_name]`,沒有時 `title-loc-key` 「Test: Purrdr needs you」(無參數);內文 `loc-key` 「This is a test. When an agent needs your reply or finishes, you'll get a notice like this.」;`sound: default`、`interruption-level: active`(與真正的「需要你」一致),**沒有 `category`**,根層只有 `pairing` 與 `event: "test"`(沒有 `pane`／`status`),點擊只開 app。主機名稱只用在這則通知的標題，不存。不看配對的 `kinds`、不去重(使用者每次按都該收到);不需要 Plus,與狀態推播共用每組密鑰每分鐘 10 則與每日上限(測試通知也算一則)(429 `rate_limited`);配對不存在 404 `pairing_not_found`、已遠端關閉或 APNs 回 410 回 410 `pairing_revoked`、APNs 其他錯誤 502 `apns_failed`。
 
     `version` 是語意化版本(`1.2.3`,可帶 `-prerelease`、`+build`,不帶 `v`),最長 64 字。同一組密鑰、同一個 `event` 與 `version` 24 小時內只送一次(`host_service_push_events`,APNs 收下後才算送過;重複的回 200 `{ delivered: false }`);`done`、`stuck`、`reminder` 不去重，由速率限制保護。
 
@@ -234,7 +238,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 
 | 表 | 內容 |
 |---|---|
-| `members` | `id`、`created_at`、`deleted_at`(目前刪除是硬刪,欄位先留) |
+| `members` | `id`、`created_at`、`deleted_at`(目前刪除是硬刪,欄位先留)、`daily_push_limit`(每個 UTC 日推播上限,空值 = 預設 100;營運者直接改這個欄位就能調整,例如 `UPDATE members SET daily_push_limit = 1000 WHERE id = ?`) |
 | `identities` | 登入方式:`provider`(apple\|google)、`subject`、`email`、`email_verified`、`is_private_relay`、`apple_refresh_token`(加密)、`linked_at`;唯一 `(provider, subject)`。`email_verified` 是 token 的 `email_verified`,Apple 私密轉寄一律 0(不參與自動合併) |
 | `subscriptions` | 訂閱:`store`(app_store\|google_play)、`external_id`(App Store 的 original transaction ID／Google Play 的 purchase token)、`status`(active\|grace\|billing_retry\|expired\|revoked\|refunded)、`expires_at`、`auto_renew`、`environment`(sandbox\|production)…;唯一 `(store, external_id)`;**部分唯一索引 `subscriptions_one_live_per_member`:每個會員在 `status` 是 active／grace／billing_retry 且 `pending_review = 0` 的列最多一筆**。`pending_review` 是遷移合併留下的「待處理」標記(見下) |
 | `subscription_events` | 稽核與冪等:`source`(store_notification\|store_api\|client)、`type`、`notification_uuid`(唯一) |
@@ -244,7 +248,7 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | `push_pairings` | 推播配對:`key_hash`(唯一)、`device_id`(→ `devices`;推播權杖在裝置上)、`kinds`、`muted`(靜音清單,JSON,預設 `[]`)、速率限制計數 |
 | `synced_hosts` | 主機同步(沿用既有,欄位本來就符合規格:內容欄位、`modified_at` 當版本、`deleted_at`) |
 
-另外有 `revoked_push_pairings`(遠端關閉的配對)與 `host_service_push_events`(主機服務事件的 24 小時去重)。之後新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`。
+另外有 `revoked_push_pairings`(遠端關閉的配對)、`host_service_push_events`(主機服務事件的 24 小時去重)與 `push_daily_usage`(#36,每個會員每個 UTC 日一列:`sent` 今日已送到 APNs 的則數、`limit_notified` 今天是否已送過「今日已達上限」通知)。之後新增的會員資料表一律 `REFERENCES members(id) ON DELETE CASCADE`。
 `subscriptions` 比規格多的欄位(`current_transaction_id`、`purchased_at`、`revoked_at`、`transaction_signed_at`、`grace_expires_at`、`renewal_signed_at`)是 App Store 的簽章時間與寬限期,晚到的舊通知靠它判斷新舊。
 
 ### 0009 遷移(會員架構重做)

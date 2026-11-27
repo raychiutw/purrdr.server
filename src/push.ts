@@ -2,13 +2,12 @@ import { importPKCS8, SignJWT } from "jose";
 import { sha256Hex } from "./identity";
 import { ApiError, readJson, requireString } from "./http";
 import { legacyDeviceId, readDeviceIdentity } from "./push-devices";
-import { hasActiveSubscription, requireActiveSubscription } from "./subscriptions";
 
 /// 推播(#29、ADR-0004、ADR-0007)。
 ///
-/// - app(會員)註冊推播配對：送配對密鑰的雜湊、APNs device token、環境與要收的種類;需要有效訂閱。
+/// - app(會員)註冊推播配對：送配對密鑰的雜湊、APNs device token、環境與要收的種類。推播不需要 Purrdr Plus(#36),改成每個會員每個 UTC 日的上限。
 /// - 主機外掛在 Agent「需要你」或「完成」、主機服務在 Agent「可能卡住」或「仍在等你」時帶密鑰呼叫 `POST /v1/push`:後台算雜湊找到配對、每組密鑰限速、
-///   確認會員仍有有效訂閱與種類偏好，再自己組 APNs payload 轉送。外掛只能送 workspace 名稱、狀態與 pane id,
+///   確認種類偏好與每日上限，再自己組 APNs payload 轉送。外掛只能送 workspace 名稱、狀態與 pane id,
 ///   多帶任何欄位(例如對話內容)一律拒絕，所以對話內容不會經過後台或 APNs。
 /// - 主機服務以同一組密鑰送事件(有新版、已更新、已退回),只能帶事件與版本;同一事件 24 小時只送一次。
 
@@ -39,6 +38,9 @@ export const PUSH_RATE_LIMIT = 10;
 const PUSH_RATE_WINDOW_MS = 60_000;
 /// 主機服務事件同一組密鑰＋event＋version 多久內只送一次。
 const HOST_SERVICE_DEDUP_MS = 24 * 60 * 60_000;
+/// 每個會員每個 UTC 日預設最多幾則推播;`members.daily_push_limit` 有值時以它為準(#36)。
+export const DEFAULT_DAILY_PUSH_LIMIT = 100;
+const DAY_MS = 24 * 60 * 60_000;
 
 const APNS_ORIGINS = { production: "https://api.push.apple.com", sandbox: "https://api.sandbox.push.apple.com" } as const;
 /// APNs 表示「這個 token 不能再用」的回應：刪掉配對，讓外掛與 app 知道要重新配對。
@@ -83,7 +85,6 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
   }
   const device = readDeviceIdentity(body);
   const kinds = readKinds(body);
-  await requireActiveSubscription(env, memberId);
 
   const existing = await env.DB.prepare("SELECT member_id, device_id FROM push_pairings WHERE key_hash = ?")
     .bind(keyHash)
@@ -291,9 +292,6 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     }
     throw new ApiError(404, "pairing_not_found", "This pairing isn't registered. Turn notifications on again in Purrdr.");
   }
-  if (!(await hasActiveSubscription(env, pairing.member_id))) {
-    throw new ApiError(403, "subscription_required", "This needs an active Purrdr Plus subscription.");
-  }
   // 不是錯誤：主機端不需要知道使用者的偏好。
   // 測試通知是使用者剛按下去的，不看種類偏好。
   if (push.kind !== "test") {
@@ -314,10 +312,38 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     throw new ApiError(429, "rate_limited", "Too many notifications. Try again in a minute.");
   }
 
-  const response = await deliverToApns(env, pairing, await apnsPayload(push, keyHash));
+  // 每日上限:先原子地預留一則(同時到的請求不會超過上限),APNs 沒收下再還回去,所以只算真的送到的。
+  const limit = await dailyLimit(env, pairing.member_id);
+  const day = utcDay(now);
+  const reservedCount = await reserveDailyPush(env, pairing.member_id, day, limit);
+  if (reservedCount === null) {
+    if (hostEvent !== null) {
+      await releaseHostServiceEvent(env, keyHash, hostEvent);
+    }
+    throw new ApiError(429, "daily_limit_reached", "Today's notification limit is reached. Try again after 00:00 UTC.", {
+      "retry-after": `${Math.ceil((nextUtcMidnight(now) - now) / 1000)}`,
+    });
+  }
+
+  let response: Response;
+  try {
+    response = await deliverToApns(env, pairing, await apnsPayload(push, keyHash));
+  } catch (error) {
+    // 連不上 APNs:預留與主機服務事件的去重登記都還回去,重送才不會被當成送過。
+    await releaseDailyPush(env, pairing.member_id, day);
+    if (hostEvent !== null) {
+      await releaseHostServiceEvent(env, keyHash, hostEvent);
+    }
+    throw error;
+  }
   if (response.ok) {
+    // 剛好是第 N 則:接著送一則「今日已達上限」通知(不計數、同一天只送一次)。
+    if (reservedCount === limit && (await claimLimitNotice(env, pairing.member_id, day))) {
+      await sendLimitNotice(env, pairing, keyHash, limit);
+    }
     return true;
   }
+  await releaseDailyPush(env, pairing.member_id, day);
   // 沒送到就不算送過，主機服務重送時可以再試。
   if (hostEvent !== null) {
     await releaseHostServiceEvent(env, keyHash, hostEvent);
@@ -328,6 +354,83 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     throw pairingRevoked();
   }
   throw new ApiError(502, "apns_failed", `Apple Push Notification service refused the notification (${reason || response.status}).`);
+}
+
+function utcDay(now: number): string {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+/// 下一個 UTC 0:00(Unix epoch 毫秒)。
+export function nextUtcMidnight(now: number): number {
+  return Math.floor(now / DAY_MS) * DAY_MS + DAY_MS;
+}
+
+/// 這個會員每個 UTC 日最多幾則:會員欄位有值用它,NULL 用預設。
+export async function dailyLimit(env: Env, memberId: string): Promise<number> {
+  const row = await env.DB.prepare("SELECT daily_push_limit FROM members WHERE id = ?").bind(memberId).first<{ daily_push_limit: number | null }>();
+  return row?.daily_push_limit ?? DEFAULT_DAILY_PUSH_LIMIT;
+}
+
+/// 今日推播用量(會員快照的 `pushUsage`):今日上限、已送則數、下次歸零的時間(UTC 0:00,ISO 8601)。
+export type PushUsage = { limit: number; sent: number; resetsAt: string };
+
+export async function pushUsageView(env: Env, memberId: string): Promise<PushUsage> {
+  const now = Date.now();
+  const [limit, usage] = await Promise.all([
+    dailyLimit(env, memberId),
+    env.DB.prepare("SELECT sent FROM push_daily_usage WHERE member_id = ? AND day = ?").bind(memberId, utcDay(now)).first<{ sent: number }>(),
+  ]);
+  return { limit, sent: usage?.sent ?? 0, resetsAt: new Date(nextUtcMidnight(now)).toISOString() };
+}
+
+/// 預留今天的一則:一個 UPSERT 完成,未滿上限才加一,同時到的請求不會互相蓋掉。回傳預留後今天的則數;已滿回 null。
+async function reserveDailyPush(env: Env, memberId: string, day: string, limit: number): Promise<number | null> {
+  const reserved = await env.DB.prepare(
+    `INSERT INTO push_daily_usage (member_id, day, sent, limit_notified) SELECT ?1, ?2, 1, 0 WHERE ?3 > 0
+     ON CONFLICT (member_id, day) DO UPDATE SET sent = sent + 1 WHERE push_daily_usage.sent < ?3
+     RETURNING sent`,
+  )
+    .bind(memberId, day, limit)
+    .first<{ sent: number }>();
+  return reserved?.sent ?? null;
+}
+
+async function releaseDailyPush(env: Env, memberId: string, day: string): Promise<void> {
+  await env.DB.prepare("UPDATE push_daily_usage SET sent = MAX(sent - 1, 0) WHERE member_id = ? AND day = ?").bind(memberId, day).run();
+}
+
+/// 今天還沒通知過時回 true(一個 UPDATE 完成,只有一個請求拿得到)。
+async function claimLimitNotice(env: Env, memberId: string, day: string): Promise<boolean> {
+  const claimed = await env.DB.prepare("UPDATE push_daily_usage SET limit_notified = 1 WHERE member_id = ? AND day = ? AND limit_notified = 0 RETURNING member_id")
+    .bind(memberId, day)
+    .first();
+  return claimed !== null;
+}
+
+/// 「今日已達上限」通知:送到觸發的那支裝置;失敗不影響剛送出的那則推播。
+async function sendLimitNotice(env: Env, pairing: Pairing, keyHash: string, limit: number): Promise<void> {
+  try {
+    await deliverToApns(env, pairing, limitNoticePayload(keyHash, limit));
+  } catch {
+    // 通知送不到不重試:今天已經標記過,不重複打擾。
+  }
+}
+
+function limitNoticePayload(keyHash: string, limit: number): Record<string, unknown> {
+  return {
+    aps: {
+      alert: {
+        "title-loc-key": "Daily notification limit reached",
+        "loc-key": "You've reached today's limit of %@ notifications. They'll resume at 00:00 UTC.",
+        "loc-args": [String(limit)],
+      },
+      sound: "default",
+      "interruption-level": "active",
+      "mutable-content": 1,
+    },
+    pairing: keyHash,
+    event: "daily_limit_reached",
+  };
 }
 
 /// 登記這次的主機服務事件;24 小時內送過同一組 event＋version 時回 false。

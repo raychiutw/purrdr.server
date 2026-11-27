@@ -80,6 +80,8 @@ class IdentityProviders {
   apnsCalls: ApnsCall[] = [];
   /** 假 APNs 依序回的結果;用完之後一律 200。 */
   apnsReplies: ApnsReply[] = [];
+  /** 假 APNs 收到推播後先等這個(例如卡住一則請求);回傳的回應優先於 `apnsReplies`,回 undefined 就照 `apnsReplies`。 */
+  apnsHold: ((call: ApnsCall) => Promise<ApnsReply | undefined>) | null = null;
   /// 假 App Store Server API 收到的請求。
   appStoreApiCalls: AppStoreApiCall[] = [];
   /// 假 App Store Server API 的回應;預設是 404(查無此交易)。測試自己簽 JWS 放進 body。
@@ -104,6 +106,7 @@ class IdentityProviders {
     this.appleTokenStatus = 200;
     this.apnsCalls = [];
     this.apnsReplies = [];
+    this.apnsHold = null;
     this.appStoreApiCalls = [];
     this.appStoreApiHandler = () => ({ status: 404, body: { errorCode: 4040010, errorMessage: "Transaction id not found." } });
     this.googlePlayCalls = [];
@@ -219,7 +222,8 @@ class IdentityProviders {
       providerTokenValid: authorization.startsWith("bearer ") && (await verifyApnsProviderToken(authorization.slice("bearer ".length))),
       payload: await request.json(),
     });
-    const reply = this.apnsReplies.shift() ?? { status: 200 };
+    const held = this.apnsHold === null ? undefined : await this.apnsHold(this.apnsCalls[this.apnsCalls.length - 1]!);
+    const reply = held ?? this.apnsReplies.shift() ?? { status: 200 };
     if (reply.status === 200) {
       return new Response(null, { status: 200, headers: { "apns-id": crypto.randomUUID() } });
     }

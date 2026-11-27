@@ -1,4 +1,5 @@
 import type { Provider, VerifiedIdentity } from "./identity";
+import { pushUsageView, type PushUsage } from "./push";
 import { decryptAppleToken, encryptAppleToken } from "./token-encryption";
 
 /// 寫入前加密 Apple refresh token(沒有就是 null,讓 COALESCE 保留舊值)。
@@ -10,9 +11,12 @@ export async function sealedAppleToken(env: Env, identity: VerifiedIdentity, app
 export type MemberView = {
   id: string;
   identities: { provider: Provider; email: string | null; linkedAt: string }[];
+  /** 今日推播用量(#36):每日上限、已送則數、下次歸零時間(UTC)。 */
+  pushUsage: PushUsage;
 };
 
 export async function memberView(env: Env, memberId: string): Promise<MemberView> {
+  const pushUsage = await pushUsageView(env, memberId);
   const { results } = await env.DB.prepare(
     "SELECT provider, email, linked_at FROM identities WHERE member_id = ? ORDER BY linked_at, provider",
   )
@@ -21,6 +25,7 @@ export async function memberView(env: Env, memberId: string): Promise<MemberView
   return {
     id: memberId,
     identities: results.map((row) => ({ provider: row.provider, email: row.email, linkedAt: new Date(row.linked_at).toISOString() })),
+    pushUsage,
   };
 }
 
