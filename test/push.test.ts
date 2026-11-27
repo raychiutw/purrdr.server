@@ -63,14 +63,13 @@ describe("註冊推播配對", () => {
     expect(JSON.stringify(rows)).not.toContain(key);
   });
 
-  it("沒有有效訂閱時拒絕(403 subscription_required),什麼都不存", async () => {
+  it("沒有訂閱也能註冊(推播不需要 Plus,purrdr.server#36)", async () => {
     const me = await member();
 
     const registered = await register(me.accessToken, pairingKey());
 
-    expect(registered.status).toBe(403);
-    expect(registered.body.error.code).toBe("subscription_required");
-    expect(await pairingRows()).toHaveLength(0);
+    expect(registered.status).toBe(201);
+    expect(await pairingRows()).toHaveLength(1);
   });
 
   it("沒帶存取權杖時拒絕", async () => {
@@ -232,7 +231,7 @@ describe("主機外掛送推播", () => {
     expect(sent.body.error.code).toBe("pairing_not_found");
   });
 
-  it("會員的訂閱到期後不轉送(403 subscription_required)", async () => {
+  it("會員的訂閱到期後照樣轉送(推播不看 Plus,#36)", async () => {
     const me = await member();
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
@@ -241,9 +240,8 @@ describe("主機外掛送推播", () => {
 
     const sent = await push(blocked(key));
 
-    expect(sent.status).toBe(403);
-    expect(sent.body.error.code).toBe("subscription_required");
-    expect(identityProviders.apnsCalls).toHaveLength(0);
+    expect(sent.status).toBe(200);
+    expect(identityProviders.apnsCalls).toHaveLength(1);
   });
 
   it("每組密鑰每分鐘最多 10 則，超過回 429 rate_limited", async () => {
@@ -398,7 +396,7 @@ describe("Agent 完成(done)與種類偏好", () => {
     expect(identityProviders.apnsCalls).toHaveLength(1);
   });
 
-  it("訂閱到期後 done 一樣不轉送(403 subscription_required)", async () => {
+  it("訂閱到期後 done 照樣轉送(#36)", async () => {
     const me = await member();
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
@@ -407,9 +405,8 @@ describe("Agent 完成(done)與種類偏好", () => {
 
     const sent = await push(done(key));
 
-    expect(sent.status).toBe(403);
-    expect(sent.body.error.code).toBe("subscription_required");
-    expect(identityProviders.apnsCalls).toHaveLength(0);
+    expect(sent.status).toBe(200);
+    expect(identityProviders.apnsCalls).toHaveLength(1);
   });
 
   it("APNs 回 Unregistered 時 done 一樣回 410 pairing_revoked 並刪掉配對", async () => {
@@ -546,7 +543,7 @@ describe("Agent 可能卡住(stuck)與仍在等你(reminder)", () => {
     expect(limited.body.error.code).toBe("rate_limited");
   });
 
-  it("訂閱到期後 stuck、reminder 一樣不轉送(403 subscription_required)", async () => {
+  it("訂閱到期後 stuck、reminder 照樣轉送(#36)", async () => {
     const me = await member();
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
@@ -555,10 +552,9 @@ describe("Agent 可能卡住(stuck)與仍在等你(reminder)", () => {
 
     for (const body of [stuck(key), reminder(key)]) {
       const sent = await push(body);
-      expect(sent.status).toBe(403);
-      expect(sent.body.error.code).toBe("subscription_required");
+      expect(sent.status).toBe(200);
     }
-    expect(identityProviders.apnsCalls).toHaveLength(0);
+    expect(identityProviders.apnsCalls).toHaveLength(2);
   });
 
   it.each([
@@ -733,7 +729,7 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
     expect(limited.body.error.code).toBe("rate_limited");
   });
 
-  it("訂閱到期後主機服務事件一樣不轉送(403 subscription_required)", async () => {
+  it("訂閱到期後主機服務事件照樣轉送(#36)", async () => {
     const me = await member();
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
@@ -742,9 +738,8 @@ describe("主機服務事件(有新版、已更新、已退回)", () => {
 
     const sent = await push(hostEvent(key, "host_service_update_available"));
 
-    expect(sent.status).toBe(403);
-    expect(sent.body.error.code).toBe("subscription_required");
-    expect(identityProviders.apnsCalls).toHaveLength(0);
+    expect(sent.status).toBe(200);
+    expect(identityProviders.apnsCalls).toHaveLength(1);
   });
 
   it("遠端關閉的配對送主機服務事件回 410 pairing_revoked,只回一次", async () => {
@@ -1010,7 +1005,7 @@ describe("測試通知(event: test,#19)", () => {
     expect(await pairingRows()).toHaveLength(0);
   });
 
-  it("會員的訂閱到期後不轉送(403 subscription_required)", async () => {
+  it("會員的訂閱到期後測試通知照樣轉送(#36)", async () => {
     const me = await member();
     const purchaseDate = Date.now() - 40 * DAY;
     await submitTransaction(me.accessToken, { appAccountToken: me.id, purchaseDate, expiresDate: purchaseDate + 30 * DAY });
@@ -1019,9 +1014,8 @@ describe("測試通知(event: test,#19)", () => {
 
     const sent = await push(testEvent(key));
 
-    expect(sent.status).toBe(403);
-    expect(sent.body.error.code).toBe("subscription_required");
-    expect(identityProviders.apnsCalls).toHaveLength(0);
+    expect(sent.status).toBe(200);
+    expect(identityProviders.apnsCalls).toHaveLength(1);
   });
 
   it("不認得的密鑰回 404 pairing_not_found", async () => {
