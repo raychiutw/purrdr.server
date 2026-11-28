@@ -19,6 +19,12 @@ const PANE_ID = /^[A-Za-z0-9:_.-]{1,64}$/;
 const ENVIRONMENTS = new Set(["production", "sandbox"]);
 /// 外掛可以送的欄位;其他一律拒絕。
 const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane", "tab", "workSeconds"]);
+/// 方案用量通知(#42)可以送的欄位:不帶 workspace、pane、tab。
+const USAGE_PUSH_FIELDS = new Set(["key", "status", "agent", "threshold", "resetsAt"]);
+const USAGE_AGENTS: Record<string, string> = { claude: "Claude", codex: "Codex" };
+const USAGE_THRESHOLDS = new Set([80, 95]);
+/// resetsAt 是 Unix 秒;上限擋掉誤送毫秒(約西元 2100 年)。
+const MAX_RESETS_AT = 4_102_444_800;
 /// 主機服務事件可以送的欄位;與上面的狀態形狀互斥。
 const HOST_SERVICE_PUSH_FIELDS = new Set(["key", "event", "version"]);
 /// 測試通知(#19):配對密鑰、事件名與選填的主機名稱，不收 version、pane 等任何其他欄位。
@@ -145,7 +151,9 @@ type StatusPush = { kind: "status"; key: string; workspace: string; status: Push
 type HostServicePush = { kind: "host_service"; key: string; event: HostServiceEvent; version: string | null };
 /// 使用者在 app 帳號頁按「傳送測試通知」:不是配對的推播種類，不受偏好、去重影響。
 type TestPush = { kind: "test"; key: string; hostName: string | null };
-type PushRequest = StatusPush | HostServicePush | TestPush;
+/// 方案用量跨過門檻(#42):去重鍵 (會員, agent, resetsAt, threshold)。
+type UsagePush = { kind: "usage"; key: string; agent: string; threshold: number; resetsAt: number };
+type PushRequest = StatusPush | HostServicePush | TestPush | UsagePush;
 
 async function readPushRequest(request: Request): Promise<PushRequest> {
   const text = await request.text();
@@ -163,7 +171,7 @@ async function readPushRequest(request: Request): Promise<PushRequest> {
   }
   const fields = body as Record<string, unknown>;
   if (fields.event === undefined) {
-    return readStatusPush(fields);
+    return fields.status === "usage" ? readUsagePush(fields) : readStatusPush(fields);
   }
   return fields.event === "test" ? readTestPush(fields) : readHostServicePush(fields);
 }
@@ -208,6 +216,23 @@ function readWorkSeconds(value: unknown): number | null {
     throw invalid("workSeconds must be a non-negative integer.");
   }
   return value;
+}
+
+function readUsagePush(fields: Record<string, unknown>): UsagePush {
+  const key = readPushKey(fields, USAGE_PUSH_FIELDS);
+  const agent = fields.agent;
+  const threshold = fields.threshold;
+  const resetsAt = fields.resetsAt;
+  if (typeof agent !== "string" || !Object.hasOwn(USAGE_AGENTS, agent)) {
+    throw invalid("agent must be claude or codex.");
+  }
+  if (typeof threshold !== "number" || !USAGE_THRESHOLDS.has(threshold)) {
+    throw invalid("threshold must be 80 or 95.");
+  }
+  if (typeof resetsAt !== "number" || !Number.isSafeInteger(resetsAt) || resetsAt <= 0 || resetsAt > MAX_RESETS_AT) {
+    throw invalid("resetsAt must be a Unix timestamp in seconds.");
+  }
+  return { kind: "usage", key, agent, threshold, resetsAt };
 }
 
 function readTestPush(fields: Record<string, unknown>): TestPush {
@@ -297,7 +322,7 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   // 測試通知是使用者剛按下去的，不看種類偏好。
   let outgoing: PushRequest = push;
   if (push.kind !== "test") {
-    const kind = push.kind === "host_service" ? "host_service" : push.status;
+    const kind = push.kind === "host_service" ? "host_service" : push.kind === "usage" ? "usage_alert" : push.status;
     if (!(await acceptsKind(env, pairing, kind))) {
       // 「完成」沒開,但工作超過門檻而且開了「長時間工作完成」:改送那一則(「完成」開著時照常送「完成」,不重複)。
       const isLongWork = push.kind === "status" && kind === "done" && (push.workSeconds ?? 0) >= LONG_WORK_SECONDS;
@@ -307,6 +332,11 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
       outgoing = { ...push, longWork: true };
     }
   }
+  const usageAlert = push.kind === "usage" ? push : null;
+  // 用量通知以會員為單位去重:同一週期同一門檻只送一次(多組配對也只送一次)。
+  if (usageAlert !== null && !(await claimUsageAlert(env, pairing.member_id, usageAlert, now))) {
+    return false;
+  }
   const hostEvent = push.kind === "host_service" ? push : null;
   if (hostEvent !== null && !(await claimHostServiceEvent(env, keyHash, pairing.member_id, hostEvent, now))) {
     return false;
@@ -315,6 +345,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   if (await exceedsRateLimit(env, keyHash, now)) {
     if (hostEvent !== null) {
       await releaseHostServiceEvent(env, keyHash, hostEvent);
+    }
+    if (usageAlert !== null) {
+      await releaseUsageAlert(env, pairing.member_id, usageAlert);
     }
     throw new ApiError(429, "rate_limited", "Too many notifications. Try again in a minute.");
   }
@@ -326,6 +359,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   if (reservedCount === null) {
     if (hostEvent !== null) {
       await releaseHostServiceEvent(env, keyHash, hostEvent);
+    }
+    if (usageAlert !== null) {
+      await releaseUsageAlert(env, pairing.member_id, usageAlert);
     }
     // 這組配對今天還沒通知過、而且開著「今日已達上限」時,補送一則(每組配對各自登記,別組配對到上限那一刻沒收到的,下次被擋時補收)。
     await noticeDailyLimit(env, pairing, keyHash, limit, day);
@@ -343,6 +379,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     if (hostEvent !== null) {
       await releaseHostServiceEvent(env, keyHash, hostEvent);
     }
+    if (usageAlert !== null) {
+      await releaseUsageAlert(env, pairing.member_id, usageAlert);
+    }
     throw error;
   }
   if (response.ok) {
@@ -356,6 +395,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   // 沒送到就不算送過，主機服務重送時可以再試。
   if (hostEvent !== null) {
     await releaseHostServiceEvent(env, keyHash, hostEvent);
+  }
+  if (usageAlert !== null) {
+    await releaseUsageAlert(env, pairing.member_id, usageAlert);
   }
   const reason = await apnsReason(response);
   if (response.status === 410 || DEAD_TOKEN_REASONS.has(reason)) {
@@ -482,6 +524,23 @@ function dedupVersion(push: HostServicePush): string {
   return push.version ?? "";
 }
 
+/// 登記這次的用量通知;同一會員同一 agent、週期、門檻送過時回 false(一個 INSERT 完成,同時到的重複請求只有一個拿得到)。
+async function claimUsageAlert(env: Env, memberId: string, push: UsagePush, now: number): Promise<boolean> {
+  const claimed = await env.DB.prepare(
+    `INSERT INTO usage_alert_events (member_id, agent, resets_at, threshold, sent_at) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT (member_id, agent, resets_at, threshold) DO NOTHING RETURNING member_id`,
+  )
+    .bind(memberId, push.agent, push.resetsAt, push.threshold, now)
+    .first();
+  return claimed !== null;
+}
+
+async function releaseUsageAlert(env: Env, memberId: string, push: UsagePush): Promise<void> {
+  await env.DB.prepare("DELETE FROM usage_alert_events WHERE member_id = ? AND agent = ? AND resets_at = ? AND threshold = ?")
+    .bind(memberId, push.agent, push.resetsAt, push.threshold)
+    .run();
+}
+
 function pairingRevoked(): ApiError {
   return new ApiError(410, "pairing_revoked", "This device no longer accepts notifications. Turn notifications on again in Purrdr.");
 }
@@ -510,6 +569,9 @@ export async function apnsPayload(push: PushRequest, keyHash: string, hostName: 
   }
   if (push.kind === "test") {
     return testPayload(push, keyHash);
+  }
+  if (push.kind === "usage") {
+    return usagePayload(push, keyHash, hostName);
   }
   const alert = push.longWork === true ? { ...STATUS_ALERTS.done, locKey: LONG_WORK_LOC_KEY } : STATUS_ALERTS[push.status];
   return {
@@ -545,6 +607,28 @@ function testPayload(push: TestPush, keyHash: string): Record<string, unknown> {
     },
     pairing: keyHash,
     event: "test",
+  };
+}
+
+/// 方案用量通知:標題固定「Plan usage」,內文以 `loc-args` 帶 agent 顯示名與門檻百分比(內文裡的 %% 是字面的 %)。
+/// 根層帶 `agent`、`threshold`,點擊開 app 的方案用量頁;不帶 category、pane、workspace。
+function usagePayload(push: UsagePush, keyHash: string, hostName: string | null): Record<string, unknown> {
+  return {
+    aps: {
+      alert: {
+        "title-loc-key": "Plan usage",
+        "loc-key": "Your %@ plan usage reached %@%%.",
+        "loc-args": [USAGE_AGENTS[push.agent], String(push.threshold)],
+        ...subtitleOf(hostName),
+      },
+      sound: "default",
+      "interruption-level": "active",
+      "mutable-content": 1,
+    },
+    pairing: keyHash,
+    event: "usage_alert",
+    agent: push.agent,
+    threshold: push.threshold,
   };
 }
 

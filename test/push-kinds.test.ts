@@ -42,14 +42,14 @@ describe("GET /v1/push-kinds", () => {
     expect((await api("GET", "/v1/push-kinds")).status).toBe(401);
   });
 
-  it("回第一版的種類(含 long_work_done),依順序", async () => {
+  it("回種類清單(含 long_work_done、usage_alert),依順序", async () => {
     const me = await member();
 
     const response = await api("GET", "/v1/push-kinds", { accessToken: me.accessToken });
 
     expect(response.status).toBe(200);
     expect(response.body.kinds.map((kind: { code: string }) => kind.code)).toEqual([
-      "blocked", "done", "long_work_done", "stuck", "reminder", "host_service", "daily_limit_reached",
+      "blocked", "done", "long_work_done", "stuck", "reminder", "host_service", "daily_limit_reached", "usage_alert",
     ]);
     expect(response.body.kinds[0]).toEqual({
       code: "blocked",
@@ -62,7 +62,7 @@ describe("GET /v1/push-kinds", () => {
       order: 10,
     });
     const defaults = Object.fromEntries(response.body.kinds.map((kind: { code: string; defaultOn: boolean }) => [kind.code, kind.defaultOn]));
-    expect(defaults).toEqual({ blocked: true, done: false, stuck: false, reminder: false, host_service: false, daily_limit_reached: true, long_work_done: false });
+    expect(defaults).toEqual({ blocked: true, done: false, stuck: false, reminder: false, host_service: false, daily_limit_reached: true, long_work_done: false, usage_alert: true });
   });
 
   it("停用的種類不出現,最低版本與順序照資料表", async () => {
