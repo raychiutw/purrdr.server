@@ -65,6 +65,15 @@ describe("GET /v1/push-kinds", () => {
     expect(defaults).toEqual({ blocked: true, done: false, stuck: false, reminder: false, host_service: false, daily_limit_reached: true, long_work_done: false, usage_alert: true, queue_paused: true, host_offline: false, host_recovered: false });
   });
 
+  it("queue_paused、usage_alert 的名稱對齊票名", async () => {
+    const me = await member();
+    const response = await api("GET", "/v1/push-kinds", { accessToken: me.accessToken });
+    const names = Object.fromEntries(response.body.kinds.map((kind: { code: string; name: unknown }) => [kind.code, kind.name]));
+
+    expect(names.queue_paused).toEqual({ en: "Queued send paused", "zh-Hant": "預約送出被暫停" });
+    expect(names.usage_alert).toEqual({ en: "Plan usage running low", "zh-Hant": "方案用量快用完" });
+  });
+
   it("停用的種類不出現,最低版本與順序照資料表", async () => {
     const me = await member();
     await env.DB.prepare("UPDATE push_kinds SET disabled = 1 WHERE code = 'stuck'").run();

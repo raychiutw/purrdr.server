@@ -68,16 +68,27 @@ export async function activeKindCodes(env: Env): Promise<Set<string>> {
 }
 
 /// 請求裡的 `kinds`:要是字串陣列,而且每一種都在清單裡(未知或已停用 → 400);去重後存成 JSON 字串。
-export async function readKinds(env: Env, value: unknown): Promise<string> {
+/// `skipDisabled`(註冊配對用):已知但停用的代號略過、其餘照存,舊 app 的註冊不會整個失敗;未知代號仍 400。
+export async function readKinds(env: Env, value: unknown, options: { skipDisabled?: boolean } = {}): Promise<string> {
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
     throw invalid("kinds must be an array of notification kind codes.");
   }
   const active = await activeKindCodes(env);
-  const unsupported = value.find((code) => !active.has(code));
+  let accepted: string[] = value;
+  if (options.skipDisabled === true) {
+    const { results } = await env.DB.prepare("SELECT code FROM push_kinds").all<{ code: string }>();
+    const known = new Set(results.map((row) => row.code));
+    const unknown = value.find((code) => !known.has(code));
+    if (unknown !== undefined) {
+      throw invalid(`Unsupported kind: ${unknown}.`);
+    }
+    accepted = value.filter((code) => active.has(code));
+  }
+  const unsupported = accepted.find((code) => !active.has(code));
   if (unsupported !== undefined) {
     throw invalid(`Unsupported kind: ${unsupported}.`);
   }
-  return JSON.stringify([...new Set(value)]);
+  return JSON.stringify([...new Set(accepted)]);
 }
 
 /// D1 存的是 JSON 字串;只留清單裡還可用的種類,舊資料或手改的值不會讓推播出錯。

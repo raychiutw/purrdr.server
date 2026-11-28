@@ -78,10 +78,18 @@ describe("POST /v1/push status queue_paused", () => {
     expect(identityProviders.apnsCalls).toHaveLength(2);
   });
 
-  it("去重窗口過了(恢復後再暫停)會再送", async () => {
+  it("60 秒內的重送被擋(只擋重試)", async () => {
     const { key } = await pairedWith(["queue_paused"]);
     await push(paused(key));
-    await env.DB.prepare("UPDATE queue_paused_events SET sent_at = sent_at - 6 * 60 * 1000").run();
+    await env.DB.prepare("UPDATE queue_paused_events SET sent_at = sent_at - 50 * 1000").run();
+
+    expect((await push(paused(key))).body).toEqual({ delivered: false });
+  });
+
+  it("去重窗口(60 秒)過了(恢復後再暫停)會再送", async () => {
+    const { key } = await pairedWith(["queue_paused"]);
+    await push(paused(key));
+    await env.DB.prepare("UPDATE queue_paused_events SET sent_at = sent_at - 61 * 1000").run();
 
     const again = await push(paused(key));
 
