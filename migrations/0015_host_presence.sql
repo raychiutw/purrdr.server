@@ -18,5 +18,5 @@ CREATE TABLE host_presence (
 CREATE INDEX host_presence_state_seen ON host_presence (state, last_seen_at);
 
 INSERT INTO push_kinds (code, name_en, name_zh, description_en, description_zh, default_on, transports, min_service_version, sort_order) VALUES
-  ('host_offline', 'Host offline', '主機離線', 'Your computer stopped reporting for 15 minutes (not counting sleep).', '電腦連續 15 分鐘沒有回報(睡眠不算)。', 0, '["https"]', '0.16.0', 70),
-  ('host_recovered', 'Host back online', '主機已恢復', 'Your computer is back online after being offline.', '電腦離線後恢復連線。', 0, '["https"]', '0.16.0', 80);
+  ('host_offline', 'Host offline', '主機離線', 'Your computer stopped reporting for 15 minutes (not counting sleep).', '電腦連續 15 分鐘沒有回報(睡眠不算)。', 0, '["https"]', '0.16.0', 80),
+  ('host_recovered', 'Host back online', '主機已恢復', 'Your computer is back online after being offline.', '電腦離線後恢復連線。', 0, '["https"]', '0.16.0', 90);
