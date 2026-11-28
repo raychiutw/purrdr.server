@@ -31,7 +31,7 @@ import {
   signAccessToken,
 } from "./tokens";
 
-/// Purrdr 後台(ADR-0004、ADR-0007)。API 一覽見 README.md。
+/// Purrdr 後台(ADR-0004、ADR-0007)。API 一覽見 docs/backend.md。
 export default {
   async fetch(request, env): Promise<Response> {
     try {

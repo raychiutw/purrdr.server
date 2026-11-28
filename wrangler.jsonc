@@ -1,5 +1,5 @@
 // Purrdr 後台(ADR-0004、ADR-0007、ADR-0009)。
-// 標成 REPLACE_ME 的值上線前要換成真值，清單見 README.md「上線前要填的東西」。
+// 標成 REPLACE_ME 的值上線前要換成真值，清單見 docs/backend.md「上線前要填的東西」。
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "purrdr-backend",
@@ -36,10 +36,10 @@
     // APNs 驗證金鑰(.p8)的 Key ID(推播轉送，#29)。Team ID 沿用 APPLE_TEAM_ID,topic 是 APPLE_CLIENT_ID(bundle id)。
     "APNS_KEY_ID": "663SWUGMD9",
     // App Store Server API 的 In-App Purchase 金鑰(.p8)的 Key ID 與 Issuer ID(#25;App Store Connect → 使用者與存取權限 → 整合 → App 內購買項目)。
-    // 兩者都只是識別碼,單獨拿到不能做任何事。上線前換成真值,見 README「上線前要填的東西」。
+    // 兩者都只是識別碼,單獨拿到不能做任何事。上線前換成真值,見 docs/backend.md「上線前要填的東西」。
     "APP_STORE_API_KEY_ID": "5UCMXA2DN8",
     "APP_STORE_API_ISSUER_ID": "7c1b07e1-a6c0-4243-9686-70a7aee19642",
-    // Google Play 串接(#26),全部只是識別碼。上線前換成真值,見 README「Google Play 串接」。
+    // Google Play 串接(#26),全部只是識別碼。上線前換成真值,見 docs/backend.md「Google Play 串接」。
     // Android app 的 package name(Developer API 的 {packageName},RTDN 的 packageName 也要相同)。
     "GOOGLE_PLAY_PACKAGE_NAME": "REPLACE_ME",
     // 呼叫 Developer API 的服務帳戶 email(Play Console 已授權);私鑰是 secret GOOGLE_PLAY_SERVICE_ACCOUNT_KEY。

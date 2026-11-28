@@ -30,6 +30,12 @@ jobs:
       - name: 安裝依賴
         run: npm ci
 
+      # Release 頁面的「本版更新」取自 CHANGELOG.md,升版時要一起寫。
+      - name: 版本說明
+        run: |
+          version="$(scripts/package-version.sh)"
+          grep -qx "## $version" CHANGELOG.md || { echo "::error::CHANGELOG.md 缺少 ## $version 的版本說明"; exit 1; }
+
       - name: 型別檢查(含 wrangler types 是否最新)
         run: npm run typecheck
 

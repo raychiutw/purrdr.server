@@ -1,0 +1,77 @@
+name: Release
+
+# 後台的版本發行:建立 tag `v<版本>` 與 GitHub Release,說明取自 CHANGELOG.md。
+#
+# 合併進 master 且 package.json 的版本號有變才發行;也可手動觸發(gh workflow run release.yml --ref master),
+# 但同一個版本的 Release 已存在時失敗(不覆蓋)。
+# **Release 不部署**:不執行 migration、不上傳 Worker、不碰 secret;部署由使用者手動(見 AGENTS.md「部署」)。
+# PR 的 CI(ci.yml)已跑過型別檢查與測試,這裡不重測。
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 發行 GitHub Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 2
+
+      - id: version
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          current="$(scripts/package-version.sh HEAD)"
+          echo "version=$current" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "手動觸發:發行 $current"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # merge commit 的第一個 parent 是合併前的 master;那時還沒有版本號(第一次發行)也算有變。
+          previous="$(scripts/package-version.sh HEAD^1 2>/dev/null || echo none)"
+          if [ "$current" = "$previous" ]; then
+            echo "版本號沒變($current),不發行"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "版本號 $previous → $current,發行"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 建立 Release
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "Release $tag 已存在,不覆蓋;要重發請先遞增 package.json 的 version"
+            exit 1
+          fi
+          # 本版更新:取 CHANGELOG.md 裡 `## <版本>` 那一段;沒寫就略過,不擋發行。
+          changes="$(awk -v heading="## $VERSION" '$0 == heading { found = 1; next } found && /^## / { exit } found' CHANGELOG.md | sed '/./,$!d')"
+          if [ -n "$changes" ]; then
+            notes="$(printf '## 本版更新\n\n%s\n' "$changes")"
+          else
+            echo "::warning::CHANGELOG.md 沒有 ${VERSION} 的版本說明"
+            notes="Purrdr 後台 ${VERSION}。"
+          fi
+          gh release create "$tag" --target "$GITHUB_SHA" --title "Purrdr 後台 $VERSION" --notes "$notes" --latest

@@ -2,7 +2,7 @@
 
 ## 專案性質
 
-Purrdr 的後台：Cloudflare Worker + D1,負責會員登入、訂閱權限、推播轉送與主機同步(聊天與終端機不經過這裡)。從 app repo [`raychiutw/purrdr.ios`](https://github.com/raychiutw/purrdr.ios) 的 `backend/` 抽出(保留歷史),**公開 repo**。API、資料表與上線前設定見 `README.md`。
+Purrdr 的後台：Cloudflare Worker + D1,負責會員登入、訂閱權限、推播轉送與主機同步(聊天與終端機不經過這裡)。從 app repo [`raychiutw/purrdr.ios`](https://github.com/raychiutw/purrdr.ios) 的 `backend/` 抽出(保留歷史),**公開 repo**。API、資料表與上線前設定見 [`docs/backend.md`](docs/backend.md)(`README.md` 只給第一次看到這個 repo 的人讀用途)。
 
 這個 repo 沒有自己的 ADR、行為規格與詞彙表，一律引用 app repo:
 - 詞彙 [`GLOSSARY.md`](https://github.com/raychiutw/purrdr.ios/blob/master/GLOSSARY.md)
@@ -28,6 +28,14 @@ CI(`.github/workflows/ci.yml`,PR 與推到 `master`):`npm ci`、`npm run typeche
 ## 部署
 
 **後台由使用者手動部署**(`npx wrangler d1 migrations apply purrdr --remote`、`npx wrangler deploy`),不會跟著 app 發布上線，CI 也不部署。Agent 不要執行 deploy、migration `--remote` 或 `wrangler secret`。
+
+## 版本與 Release
+
+- 版本號放 `package.json` 的 `version`(語意化版本,起點 `0.1.0`)。`CHANGELOG.md` 每版一段 `## <版本>`,用一般使用者看得懂的白話寫這版改了什麼,不寫內部實作、協定名稱或 issue 編號。
+- 要發行一版:開 PR 把 `package.json` 的版本號升上去(`npm version <新版本> --no-git-tag-version`,連 `package-lock.json` 一起改),同一個 PR 在 `CHANGELOG.md` 加上那個版本的段落。PR CI 的「版本說明」會檢查目前版本在 `CHANGELOG.md` 有對應段落,沒有就失敗。
+- PR 合併進 `master` 且版本號有變時,`.github/workflows/release.yml` 自動打 tag `v<版本>` 並建立 GitHub Release,說明是「## 本版更新」接 `CHANGELOG.md` 那一段(沒有對應段落只警告,不擋發行)。也可手動觸發(`gh workflow run release.yml --ref master`),但同一版本的 Release 已存在時會失敗、不覆蓋。
+- **Release 不部署**:不執行 migration、不上傳 Worker、不碰 secret。部署仍由使用者手動(見「部署」)。
+- 還沒有版本機制之前部署過的內容不補 tag;`0.1.0` 的說明涵蓋到這個版本為止的全部功能。
 
 ## 規範
 
