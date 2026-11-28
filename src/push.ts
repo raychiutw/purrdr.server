@@ -43,6 +43,9 @@ export const PUSH_RATE_LIMIT = 10;
 const PUSH_RATE_WINDOW_MS = 60_000;
 /// 主機服務事件同一組密鑰＋event＋version 多久內只送一次。
 const HOST_SERVICE_DEDUP_MS = 24 * 60 * 60_000;
+/// 佇列暫停:同一組密鑰＋pane 多久內只送一次。主機端本來就承諾同一次暫停只送一次,這裡只擋重試與重複請求;
+/// 5 分鐘夠涵蓋重試,又短到「恢復後再暫停」(通常相隔更久)會再收到。
+const QUEUE_PAUSED_DEDUP_MS = 5 * 60_000;
 /// 每個會員每個 UTC 日預設最多幾則推播;`members.daily_push_limit` 有值時以它為準(#36)。
 export const DEFAULT_DAILY_PUSH_LIMIT = 100;
 const DAY_MS = 24 * 60 * 60_000;
@@ -145,7 +148,7 @@ export async function revokePairing(env: Env, memberId: string, keyHash: string)
 
 // MARK: - 送推播(主機外掛)
 
-type PushStatus = "blocked" | "done" | "stuck" | "reminder";
+type PushStatus = "blocked" | "done" | "stuck" | "reminder" | "queue_paused";
 type HostServiceEvent = "host_service_update_available" | "host_service_updated" | "host_service_update_rolled_back";
 type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null; tab: string | null; workSeconds: number | null; longWork?: boolean };
 type HostServicePush = { kind: "host_service"; key: string; event: HostServiceEvent; version: string | null };
@@ -203,6 +206,9 @@ function readStatusPush(fields: Record<string, unknown>): StatusPush {
   }
   if (pane !== null && (typeof pane !== "string" || !PANE_ID.test(pane))) {
     throw invalid("pane must be a herdr pane id.");
+  }
+  if (status === "queue_paused" && pane === null) {
+    throw invalid("pane is required for queue_paused.");
   }
   return { kind: "status", key, workspace, status, pane, tab: readOptionalLabel(fields.tab, "tab", MAX_TAB_LENGTH), workSeconds: readWorkSeconds(fields.workSeconds) };
 }
@@ -341,8 +347,15 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   if (hostEvent !== null && !(await claimHostServiceEvent(env, keyHash, pairing.member_id, hostEvent, now))) {
     return false;
   }
+  const pausedPush = push.kind === "status" && push.status === "queue_paused" ? push : null;
+  if (pausedPush !== null && !(await claimQueuePaused(env, keyHash, pairing.member_id, pausedPush.pane ?? "", now))) {
+    return false;
+  }
   // 只有真的要送 APNs 的才計入，偏好或去重擋下的不會擠掉「需要你」。
   if (await exceedsRateLimit(env, keyHash, now)) {
+    if (pausedPush !== null) {
+      await releaseQueuePaused(env, keyHash, pausedPush.pane ?? "");
+    }
     if (hostEvent !== null) {
       await releaseHostServiceEvent(env, keyHash, hostEvent);
     }
@@ -363,6 +376,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     if (usageAlert !== null) {
       await releaseUsageAlert(env, pairing.member_id, usageAlert);
     }
+    if (pausedPush !== null) {
+      await releaseQueuePaused(env, keyHash, pausedPush.pane ?? "");
+    }
     // 這組配對今天還沒通知過、而且開著「今日已達上限」時,補送一則(每組配對各自登記,別組配對到上限那一刻沒收到的,下次被擋時補收)。
     await noticeDailyLimit(env, pairing, keyHash, limit, day);
     throw new ApiError(429, "daily_limit_reached", "Today's notification limit is reached. Try again after 00:00 UTC.", {
@@ -382,6 +398,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     if (usageAlert !== null) {
       await releaseUsageAlert(env, pairing.member_id, usageAlert);
     }
+    if (pausedPush !== null) {
+      await releaseQueuePaused(env, keyHash, pausedPush.pane ?? "");
+    }
     throw error;
   }
   if (response.ok) {
@@ -398,6 +417,9 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   }
   if (usageAlert !== null) {
     await releaseUsageAlert(env, pairing.member_id, usageAlert);
+  }
+  if (pausedPush !== null) {
+    await releaseQueuePaused(env, keyHash, pausedPush.pane ?? "");
   }
   const reason = await apnsReason(response);
   if (response.status === 410 || DEAD_TOKEN_REASONS.has(reason)) {
@@ -535,10 +557,27 @@ async function claimUsageAlert(env: Env, memberId: string, push: UsagePush, now:
   return claimed !== null;
 }
 
+/// 登記這次的佇列暫停;窗口內同一組密鑰＋pane 送過時回 false。一個 UPSERT 完成,同時到的重複請求只有一個拿得到。
+async function claimQueuePaused(env: Env, keyHash: string, memberId: string, pane: string, now: number): Promise<boolean> {
+  const claimed = await env.DB.prepare(
+    `INSERT INTO queue_paused_events (key_hash, member_id, pane, sent_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (key_hash, pane) DO UPDATE SET sent_at = excluded.sent_at
+     WHERE queue_paused_events.sent_at <= ?
+     RETURNING key_hash`,
+  )
+    .bind(keyHash, memberId, pane, now, now - QUEUE_PAUSED_DEDUP_MS)
+    .first();
+  return claimed !== null;
+}
+
 async function releaseUsageAlert(env: Env, memberId: string, push: UsagePush): Promise<void> {
   await env.DB.prepare("DELETE FROM usage_alert_events WHERE member_id = ? AND agent = ? AND resets_at = ? AND threshold = ?")
     .bind(memberId, push.agent, push.resetsAt, push.threshold)
     .run();
+}
+
+async function releaseQueuePaused(env: Env, keyHash: string, pane: string): Promise<void> {
+  await env.DB.prepare("DELETE FROM queue_paused_events WHERE key_hash = ? AND pane = ?").bind(keyHash, pane).run();
 }
 
 function pairingRevoked(): ApiError {
@@ -554,11 +593,13 @@ const LONG_WORK_LOC_KEY = "An agent finished a long task.";
 
 /// 各狀態的固定內文(app 的字串表以 `loc-key` 翻譯)、通知類別與中斷等級。
 /// 「需要你」「仍在等你」用 Time Sensitive;「完成」「可能卡住」用 active,專注模式下不打斷。
-const STATUS_ALERTS: Record<PushStatus, { locKey: string; category: string; interruptionLevel: string }> = {
+const STATUS_ALERTS: Record<PushStatus, { locKey: string; fallbackLocKey?: string; category: string; interruptionLevel: string }> = {
   blocked: { locKey: "An agent needs you.", category: "AGENT_BLOCKED", interruptionLevel: "time-sensitive" },
   done: { locKey: "An agent finished.", category: "AGENT_DONE", interruptionLevel: "active" },
   stuck: { locKey: "An agent may be stuck.", category: "AGENT_STUCK", interruptionLevel: "active" },
   reminder: { locKey: "An agent is still waiting for you.", category: "AGENT_REMINDER", interruptionLevel: "time-sensitive" },
+  // 內文帶 Tab 名稱(`loc-args`);沒有 Tab 時用 `fallbackLocKey`(不含參數)。
+  queue_paused: { locKey: "Queue paused in %@.", fallbackLocKey: "Queue paused.", category: "AGENT_QUEUE_PAUSED", interruptionLevel: "active" },
 };
 
 /// APNs payload 由後台組：標題是 workspace 名稱，內文依狀態固定。
@@ -574,9 +615,16 @@ export async function apnsPayload(push: PushRequest, keyHash: string, hostName: 
     return usagePayload(push, keyHash, hostName);
   }
   const alert = push.longWork === true ? { ...STATUS_ALERTS.done, locKey: LONG_WORK_LOC_KEY } : STATUS_ALERTS[push.status];
+  // 佇列暫停:標題只放 workspace,Tab 名稱以 loc-args 帶進內文;沒有 Tab 用後備字串。
+  const body =
+    alert.fallbackLocKey === undefined
+      ? { title: push.tab === null ? push.workspace : `${push.workspace} · ${push.tab}`, "loc-key": alert.locKey }
+      : push.tab === null
+        ? { title: push.workspace, "loc-key": alert.fallbackLocKey }
+        : { title: push.workspace, "loc-key": alert.locKey, "loc-args": [push.tab] };
   return {
     aps: {
-      alert: { title: push.tab === null ? push.workspace : `${push.workspace} · ${push.tab}`, ...subtitleOf(hostName), "loc-key": alert.locKey },
+      alert: { ...body, ...subtitleOf(hostName) },
       // 讓 app 的 Notification Service Extension 能改寫通知;同一配對同一 workspace 的通知疊在一起(不含主機名稱與 tab)。
       "mutable-content": 1,
       "thread-id": await sha256Hex(`${keyHash}\n${push.workspace}`),
