@@ -13,7 +13,7 @@ const RELAY = "abc123@privaterelay.appleid.com";
 /// 依 foreign key 的相反順序丟掉所有資料表(D1 不能關掉 foreign key),含 d1_migrations,讓 migration 從頭套用。
 async function dropEverything() {
   const tables = [
-    "push_daily_usage", "host_service_push_events", "subscription_events", "subscription_transfers", "sessions", "push_pairings", "subscriptions",
+    "push_daily_usage", "push_kinds", "host_service_push_events", "subscription_events", "subscription_transfers", "sessions", "push_pairings", "subscriptions",
     "devices", "revoked_push_pairings", "push_devices", "refresh_tokens", "entitlements", "synced_hosts", "identities", "members",
     "d1_migrations",
   ];
@@ -263,9 +263,10 @@ describe("0009 遷移:舊資料快照", () => {
       "SELECT key_hash, member_id, device_id, kinds, muted FROM push_pairings ORDER BY key_hash",
     );
     expect(pairings).toEqual([
-      { key_hash: "key-5a", member_id: "m5", device_id: "dev-5", kinds: '["blocked","done"]', muted: "[]" },
-      { key_hash: "key-5b", member_id: "m5", device_id: "dev-5", kinds: '["blocked"]', muted: "[]" },
-      { key_hash: "key-6", member_id: "m5", device_id: "token:token-6", kinds: '["blocked"]', muted: "[]" },
+      // 偏好原樣保留;0011(#39)替既有配對補開 daily_limit_reached,升級後仍收得到上限通知。
+      { key_hash: "key-5a", member_id: "m5", device_id: "dev-5", kinds: '["blocked","done","daily_limit_reached"]', muted: "[]" },
+      { key_hash: "key-5b", member_id: "m5", device_id: "dev-5", kinds: '["blocked","daily_limit_reached"]', muted: "[]" },
+      { key_hash: "key-6", member_id: "m5", device_id: "token:token-6", kinds: '["blocked","daily_limit_reached"]', muted: "[]" },
     ]);
   });
 

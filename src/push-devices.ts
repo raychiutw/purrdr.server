@@ -1,4 +1,6 @@
 import { ApiError, optionalString, readJson } from "./http";
+import { iconView, MAX_HOST_NAME_LENGTH, readIcon, readLabel, type HostIcon } from "./host-label";
+import { activeKindCodes, readKinds, storedKinds } from "./push-kinds";
 import { requireActiveSubscription } from "./subscriptions";
 
 /// 通知裝置(purrdr.server#5):同一支裝置在多台主機的配對以 device id 歸成一台裝置。
@@ -66,6 +68,10 @@ type PairingRow = {
   push_token: string | null;
   name: string | null;
   model: string | null;
+  kinds: string;
+  host_name: string | null;
+  host_icon: string | null;
+  host_icon_color: string | null;
 };
 /// 一組配對與它歸屬的裝置:`deviceId` 是對外的 id,`storedDeviceId` 是 devices.id(兩者只有遷移來的舊裝置不同)。
 type DevicePairing = {
@@ -75,13 +81,20 @@ type DevicePairing = {
   updatedAt: number;
   name: string | null;
   model: string | null;
+  kinds: string;
+  hostName: string | null;
+  icon: HostIcon | null;
 };
+
+export type PushHostView = { keyHash: string; name: string | null; icon: HostIcon | null };
 
 export type PushDeviceView = {
   deviceId: string;
   name: string | null;
   model: string | null;
   hostCount: number;
+  /// 這支裝置開著通知的主機(每組配對一台):名稱與圖示。
+  hosts: PushHostView[];
   lastRegisteredAt: number;
   current: boolean;
 };
@@ -89,7 +102,7 @@ export type PushDeviceView = {
 /// 會員的所有配對與各自的裝置。裝置名稱與型號存在 devices,與配對一起查。
 async function pairingsOfMember(env: Env, memberId: string): Promise<DevicePairing[]> {
   const { results } = await env.DB.prepare(
-    `SELECT p.key_hash, p.updated_at, p.device_id, d.push_token, d.name, d.model
+    `SELECT p.key_hash, p.updated_at, p.device_id, d.push_token, d.name, d.model, p.kinds, p.host_name, p.host_icon, p.host_icon_color
      FROM push_pairings p JOIN devices d ON d.id = p.device_id WHERE p.member_id = ?`,
   )
     .bind(memberId)
@@ -103,6 +116,9 @@ async function pairingsOfMember(env: Env, memberId: string): Promise<DevicePairi
       updatedAt: row.updated_at,
       name: row.name,
       model: row.model,
+      kinds: row.kinds,
+      hostName: row.host_name,
+      icon: iconView(row.host_icon, row.host_icon_color),
     })),
   );
 }
@@ -117,6 +133,7 @@ export async function listDevices(env: Env, memberId: string, currentDeviceId: s
     const existing = devicesById.get(pairing.deviceId);
     if (existing) {
       existing.hostCount += 1;
+      existing.hosts.push(hostOf(pairing));
       existing.lastRegisteredAt = Math.max(existing.lastRegisteredAt, pairing.updatedAt);
       continue;
     }
@@ -125,11 +142,66 @@ export async function listDevices(env: Env, memberId: string, currentDeviceId: s
       name: pairing.name,
       model: pairing.model,
       hostCount: 1,
+      hosts: [hostOf(pairing)],
       lastRegisteredAt: pairing.updatedAt,
       current: pairing.deviceId === normalizedCurrentDeviceId,
     });
   }
   return [...devicesById.values()].sort((first, second) => second.lastRegisteredAt - first.lastRegisteredAt);
+}
+
+function hostOf(pairing: DevicePairing): PushHostView {
+  return { keyHash: pairing.keyHash, name: pairing.hostName, icon: pairing.icon };
+}
+
+export type PushPairingView = { keyHash: string; name: string | null; icon: HostIcon | null; kinds: string[] };
+
+function pairingView(pairing: DevicePairing, active: Set<string>): PushPairingView {
+  return { keyHash: pairing.keyHash, name: pairing.hostName, icon: pairing.icon, kinds: storedKinds(pairing.kinds, active) };
+}
+
+/// GET /v1/members/me/push-pairings:會員的配對,每組帶名稱、圖示與目前開著的種類;`deviceId` 只回那支裝置的。
+export async function listPairings(env: Env, memberId: string, deviceId: string | null): Promise<PushPairingView[]> {
+  const normalizedDeviceId = deviceId === null ? null : parseDeviceId(deviceId);
+  const [pairings, active] = await Promise.all([pairingsOfMember(env, memberId), activeKindCodes(env)]);
+  return pairings
+    .filter((pairing) => normalizedDeviceId === null || pairing.deviceId === normalizedDeviceId)
+    .sort((first, second) => first.updatedAt - second.updatedAt || first.keyHash.localeCompare(second.keyHash))
+    .map((pairing) => pairingView(pairing, active));
+}
+
+/// PATCH /v1/members/me/push-pairings/{keyHash}:改種類、名稱、圖示(沒帶的欄位不動,`name`／`icon` 帶 null 清掉);只改自己的。
+export async function updatePairing(env: Env, memberId: string, keyHash: string, request: Request): Promise<PushPairingView> {
+  const body = await readJson(request);
+  const kinds = body.kinds === undefined ? undefined : await readKinds(env, body.kinds);
+  const name = readLabel(body.name, "name", MAX_HOST_NAME_LENGTH);
+  const icon = readIcon(body.icon);
+  const sets: string[] = [];
+  const values: unknown[] = [];
+  if (kinds !== undefined) {
+    sets.push("kinds = ?");
+    values.push(kinds);
+  }
+  if (name !== undefined) {
+    sets.push("host_name = ?");
+    values.push(name);
+  }
+  if (icon !== undefined) {
+    sets.push("host_icon = ?", "host_icon_color = ?");
+    values.push(icon?.symbol ?? null, icon?.color ?? null);
+  }
+  if (sets.length > 0) {
+    sets.push("updated_at = ?");
+    values.push(Date.now());
+    await env.DB.prepare(`UPDATE push_pairings SET ${sets.join(", ")} WHERE key_hash = ? AND member_id = ?`)
+      .bind(...values, keyHash, memberId)
+      .run();
+  }
+  const pairing = (await pairingsOfMember(env, memberId)).find((candidate) => candidate.keyHash === keyHash);
+  if (pairing === undefined) {
+    throw new ApiError(404, "pairing_not_found", "This pairing isn't registered.");
+  }
+  return pairingView(pairing, await activeKindCodes(env));
 }
 
 /// 這支裝置的所有配對(只找自己的),對外 id 找不到(不是自己的或沒有配對)回 404。
