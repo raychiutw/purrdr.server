@@ -323,9 +323,6 @@ export async function submitAppStoreTransaction(env: Env, memberId: string, sign
   return subscriptionView(env, memberId);
 }
 
-/// 遠端關閉紀錄保留 90 天(與 push-devices 相同);轉移時順手清掉過期的。
-const REVOKED_PAIRING_RETENTION_MS = 90 * 24 * 60 * 60_000;
-
 export type TransferResult = {
   subscription: SubscriptionView | null;
   /** 之後的續訂是否已經讓 Apple 歸新會員(Set App Account Token 成功)。false 時轉移仍成立,見 docs/backend.md。 */
@@ -337,8 +334,8 @@ export type TransferResult = {
 ///
 /// - 目前會員已佔著有效訂閱名額(生效中、帳單寬限期、帳單重試期)→ 409 `subscription_already_active`。
 /// - 訂閱沒登記在任何會員 → 404 `subscription_not_found`(app 該走一般綁定);已屬於自己 → 409 `subscription_already_owned`。
-/// - 改歸屬、轉移紀錄、`transferred` 事件、原會員的推播配對撤銷在同一個 D1 batch(原子)。
-///   原會員若沒有別的有效訂閱,它的推播配對全部撤銷(主機外掛之後收 410);主機同步因 `requireActiveSubscription` 自然停止。
+/// - 改歸屬、轉移紀錄、`transferred` 事件在同一個 D1 batch(原子)。
+///   推播不需要 Plus(#36),所以原會員的推播配對保留;主機同步因 `requireActiveSubscription` 自然停止。
 /// - batch 之後才呼叫 Set App Account Token;失敗(Apple 不可達是常態)不回滾轉移,記 `set_app_account_token_failed`,
 ///   回應帶 `appAccountTokenUpdated: false`。
 export async function transferSubscription(env: Env, memberId: string, signedTransaction: string): Promise<TransferResult> {
@@ -357,7 +354,6 @@ export async function transferSubscription(env: Env, memberId: string, signedTra
   }
   const now = Date.now();
   const fromMember = row.member_id;
-  const fromKeepsPlus = (await rowsOf(env, fromMember)).some((other) => other.external_id !== transaction.originalTransactionId && isActive(statusOf(other, now)));
   const moved = "EXISTS (SELECT 1 FROM subscriptions WHERE id = ?1 AND member_id = ?2)";
   try {
     await env.DB.batch([
@@ -370,16 +366,6 @@ export async function transferSubscription(env: Env, memberId: string, signedTra
         `INSERT INTO subscription_events (id, subscription_id, source, type, notification_uuid, received_at)
          SELECT ?3, ?1, 'client', 'transferred', NULL, ?4 WHERE ${moved}`,
       ).bind(row.id, memberId, crypto.randomUUID(), now),
-      env.DB.prepare("DELETE FROM revoked_push_pairings WHERE revoked_at < ?").bind(now - REVOKED_PAIRING_RETENTION_MS),
-      ...(fromKeepsPlus
-        ? []
-        : [
-            env.DB.prepare(
-              `INSERT OR REPLACE INTO revoked_push_pairings (key_hash, member_id, revoked_at)
-               SELECT key_hash, member_id, ?3 FROM push_pairings WHERE member_id = ?4 AND ${moved}`,
-            ).bind(row.id, memberId, now, fromMember),
-            env.DB.prepare(`DELETE FROM push_pairings WHERE member_id = ?3 AND ${moved}`).bind(row.id, memberId, fromMember),
-          ]),
     ]);
   } catch (error) {
     if (error instanceof Error && ONE_LIVE_SUBSCRIPTION.test(error.message)) {
