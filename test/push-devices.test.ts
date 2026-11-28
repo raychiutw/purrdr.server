@@ -79,16 +79,18 @@ describe("通知裝置清單", () => {
     expect(typeof byId[PHONE_ID].lastRegisteredAt).toBe("number");
   });
 
-  it("清單不含 device token、配對密鑰與它的雜湊", async () => {
+  it("清單不含 device token 與配對密鑰(配對雜湊只出現在 hosts,給 app 對應主機;見 purrdr.server#39)", async () => {
     const me = await subscribedMember();
     const key = await enable(me.accessToken, phone);
     const legacyKey = await enable(me.accessToken, { deviceToken: TABLET_TOKEN });
 
     const listed = JSON.stringify((await devices(me.accessToken)).body);
 
-    for (const secret of [PHONE_TOKEN, TABLET_TOKEN, key, legacyKey, await hashOf(key), await hashOf(legacyKey)]) {
+    for (const secret of [PHONE_TOKEN, TABLET_TOKEN, key, legacyKey]) {
       expect(listed).not.toContain(secret);
     }
+    const hostHashes = (await devices(me.accessToken)).body.devices.flatMap((device: { hosts: { keyHash: string }[] }) => device.hosts.map((host) => host.keyHash));
+    expect(hostHashes.sort()).toEqual([await hashOf(key), await hashOf(legacyKey)].sort());
   });
 
   it("舊版 app 沒帶 deviceId 的配對以 device token 歸類，名稱為 null(未命名裝置)", async () => {

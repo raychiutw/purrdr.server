@@ -113,6 +113,14 @@ export async function mergeMembers(
       env.DB.prepare("UPDATE push_pairings SET member_id = ? WHERE member_id = ?").bind(S, L),
       env.DB.prepare("UPDATE revoked_push_pairings SET member_id = ? WHERE member_id = ?").bind(S, L),
       env.DB.prepare("UPDATE host_service_push_events SET member_id = ? WHERE member_id = ?").bind(S, L),
+      env.DB.prepare("UPDATE queue_paused_events SET member_id = ? WHERE member_id = ?").bind(S, L),
+      env.DB.prepare("UPDATE host_presence SET member_id = ? WHERE member_id = ?").bind(S, L),
+      // 用量通知去重:鍵含 member_id,兩邊重複的以 INSERT OR IGNORE 保留保留會員那份,再刪掉被合併會員的舊列。
+      env.DB.prepare(
+        `INSERT OR IGNORE INTO usage_alert_events (member_id, agent, resets_at, threshold, sent_at)
+         SELECT ?1, agent, resets_at, threshold, sent_at FROM usage_alert_events WHERE member_id = ?2`,
+      ).bind(S, L),
+      env.DB.prepare("DELETE FROM usage_alert_events WHERE member_id = ?").bind(L),
       env.DB.prepare("UPDATE sessions SET member_id = ? WHERE member_id = ?").bind(S, L),
       env.DB.prepare("DELETE FROM members WHERE id = ?").bind(L),
     ]);

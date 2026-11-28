@@ -291,6 +291,35 @@ describe("確認合併 POST /v1/members/me/identities/merge", () => {
     expect(await count("members")).toBe(1);
   });
 
+  it("合併後保留會員仍有心跳資料與用量去重紀錄(不被 cascade 刪掉)", async () => {
+    const me = await signInWithApple("apple-user-1");
+    const other = await signInWithGoogle("google-user-1");
+    const mine = me.body.member.id;
+    const theirs = other.body.member.id;
+    await giveSubscription(theirs); // 對方有有效訂閱,留下對方;mine 被合併掉。
+    await insertPairing({ keyHash: "a".repeat(64), memberId: mine, deviceToken: "token-mine", deviceId: "device-mine" });
+    await env.DB.prepare("INSERT INTO host_presence (key_hash, member_id, state, last_seen_at) VALUES (?, ?, 'online', 123)").bind("a".repeat(64), mine).run();
+    const insertUsage = (memberId: string, threshold: number) =>
+      env.DB.prepare("INSERT INTO usage_alert_events (member_id, agent, resets_at, threshold, sent_at) VALUES (?, 'claude', 1900000000, ?, 1)").bind(memberId, threshold).run();
+    await insertUsage(mine, 80);
+    await insertUsage(mine, 95);
+    await insertUsage(theirs, 80);
+
+    const merge = await api("POST", MERGE, { accessToken: me.body.accessToken, body: await googleCredential("google-user-1") });
+
+    expect(merge.status).toBe(200);
+    const survivor = theirs;
+    expect(merge.body.mergedMemberId).toBe(mine);
+    const presence = await env.DB.prepare("SELECT member_id, state, last_seen_at FROM host_presence").all();
+    expect(presence.results).toEqual([{ member_id: survivor, state: "online", last_seen_at: 123 }]);
+    const usage = await env.DB.prepare("SELECT member_id, threshold FROM usage_alert_events ORDER BY threshold").all();
+    expect(usage.results).toEqual([
+      { member_id: survivor, threshold: 80 },
+      { member_id: survivor, threshold: 95 },
+    ]);
+    expect(await count("usage_alert_events", `member_id NOT IN (SELECT id FROM members)`)).toBe(0);
+  });
+
   it("到期但狀態還是 active 的舊列不會擋合併(合併前先依時間修正)", async () => {
     const me = await signInWithApple("apple-user-1");
     const other = await signInWithGoogle("google-user-1");

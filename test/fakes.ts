@@ -454,6 +454,6 @@ export async function insertPairing(options: {
     ).bind(deviceId, options.memberId, options.deviceToken, createdAt, createdAt),
     env.DB.prepare(
       `INSERT INTO push_pairings (id, member_id, device_id, key_hash, kinds, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).bind(crypto.randomUUID(), options.memberId, deviceId, options.keyHash, options.kinds ?? '["blocked"]', createdAt, options.updatedAt ?? createdAt),
+    ).bind(crypto.randomUUID(), options.memberId, deviceId, options.keyHash, options.kinds ?? '["blocked","daily_limit_reached"]', createdAt, options.updatedAt ?? createdAt),
   ]);
 }
