@@ -41,9 +41,9 @@ const DAY_MS = 24 * 60 * 60_000;
 
 const APNS_ORIGINS = { production: "https://api.push.apple.com", sandbox: "https://api.sandbox.push.apple.com" } as const;
 /// APNs 表示「這個 token 不能再用」的回應：刪掉配對，讓外掛與 app 知道要重新配對。
-const DEAD_TOKEN_REASONS = new Set(["BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"]);
+export const DEAD_TOKEN_REASONS = new Set(["BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"]);
 
-type Pairing = {
+export type Pairing = {
   member_id: string;
   device_token: string;
   environment: keyof typeof APNS_ORIGINS;
@@ -242,13 +242,26 @@ function isHostServiceEvent(value: string): value is HostServiceEvent {
   return Object.hasOwn(HOST_SERVICE_ALERTS, value);
 }
 
-async function findPairing(env: Env, keyHash: string): Promise<Pairing | null> {
+export async function findPairing(env: Env, keyHash: string): Promise<Pairing | null> {
   return env.DB.prepare(
     `SELECT p.member_id, d.push_token AS device_token, d.push_environment AS environment, p.kinds, p.host_name, p.limit_notified_day
      FROM push_pairings p JOIN devices d ON d.id = p.device_id WHERE p.key_hash = ?`,
   )
     .bind(keyHash)
     .first<Pairing>();
+}
+
+/// 找配對;找不到時比照 /v1/push:撤銷過的回一次 410(外掛收到後會清掉本機配對),其餘 404。
+export async function requirePairing(env: Env, keyHash: string): Promise<Pairing> {
+  const pairing = await findPairing(env, keyHash);
+  if (pairing !== null) {
+    return pairing;
+  }
+  const revoked = await env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ? RETURNING key_hash").bind(keyHash).first();
+  if (revoked !== null) {
+    throw pairingRevoked();
+  }
+  throw new ApiError(404, "pairing_not_found", "This pairing isn't registered. Turn notifications on again in Purrdr.");
 }
 
 /// 計入速率限制，回傳是否超過(固定一分鐘的視窗，一個 UPDATE 完成，避免同時的請求互相蓋掉計數)。
@@ -271,15 +284,7 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   const push = await readPushRequest(request);
   const keyHash = await pairingKeyHash(push.key);
   const now = Date.now();
-  const pairing = await findPairing(env, keyHash);
-  if (pairing === null) {
-    // 只回一次 410:外掛收到後會清掉本機配對，之後同一組密鑰當成不認得。
-    const revoked = await env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ? RETURNING key_hash").bind(keyHash).first();
-    if (revoked !== null) {
-      throw pairingRevoked();
-    }
-    throw new ApiError(404, "pairing_not_found", "This pairing isn't registered. Turn notifications on again in Purrdr.");
-  }
+  const pairing = await requirePairing(env, keyHash);
   // 不是錯誤：主機端不需要知道使用者的偏好。
   // 測試通知是使用者剛按下去的，不看種類偏好。
   if (push.kind !== "test") {
@@ -346,7 +351,7 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   throw new ApiError(502, "apns_failed", `Apple Push Notification service refused the notification (${reason || response.status}).`);
 }
 
-function utcDay(now: number): string {
+export function utcDay(now: number): string {
   return new Date(now).toISOString().slice(0, 10);
 }
 
@@ -374,7 +379,7 @@ export async function pushUsageView(env: Env, memberId: string): Promise<PushUsa
 }
 
 /// 預留今天的一則:一個 UPSERT 完成,未滿上限才加一,同時到的請求不會互相蓋掉。回傳預留後今天的則數;已滿回 null。
-async function reserveDailyPush(env: Env, memberId: string, day: string, limit: number): Promise<number | null> {
+export async function reserveDailyPush(env: Env, memberId: string, day: string, limit: number): Promise<number | null> {
   const reserved = await env.DB.prepare(
     `INSERT INTO push_daily_usage (member_id, day, sent, limit_notified) SELECT ?1, ?2, 1, 0 WHERE ?3 > 0
      ON CONFLICT (member_id, day) DO UPDATE SET sent = sent + 1 WHERE push_daily_usage.sent < ?3
@@ -385,12 +390,12 @@ async function reserveDailyPush(env: Env, memberId: string, day: string, limit: 
   return reserved?.sent ?? null;
 }
 
-async function releaseDailyPush(env: Env, memberId: string, day: string): Promise<void> {
+export async function releaseDailyPush(env: Env, memberId: string, day: string): Promise<void> {
   await env.DB.prepare("UPDATE push_daily_usage SET sent = MAX(sent - 1, 0) WHERE member_id = ? AND day = ?").bind(memberId, day).run();
 }
 
 /// 這組配對目前收不收這個種類:種類要還在清單裡(沒停用)而且在配對的偏好內。
-async function acceptsKind(env: Env, pairing: Pairing, kind: string): Promise<boolean> {
+export async function acceptsKind(env: Env, pairing: Pairing, kind: string): Promise<boolean> {
   return storedKinds(pairing.kinds, await activeKindCodes(env)).includes(kind);
 }
 
@@ -463,12 +468,12 @@ function dedupVersion(push: HostServicePush): string {
   return push.version ?? "";
 }
 
-function pairingRevoked(): ApiError {
+export function pairingRevoked(): ApiError {
   return new ApiError(410, "pairing_revoked", "This device no longer accepts notifications. Turn notifications on again in Purrdr.");
 }
 
 /// 副標題 = 這組配對的電腦名稱;沒有名稱(舊配對)不帶,由 app 的 Notification Service Extension 補。
-function subtitleOf(hostName: string | null): { subtitle?: string } {
+export function subtitleOf(hostName: string | null): { subtitle?: string } {
   return hostName === null ? {} : { subtitle: hostName };
 }
 
@@ -550,7 +555,7 @@ function hostServicePayload(push: HostServicePush, keyHash: string, hostName: st
   };
 }
 
-async function apnsReason(response: Response): Promise<string> {
+export async function apnsReason(response: Response): Promise<string> {
   try {
     const body = (await response.json()) as { reason?: unknown };
     return typeof body.reason === "string" ? body.reason : "";
@@ -559,7 +564,7 @@ async function apnsReason(response: Response): Promise<string> {
   }
 }
 
-async function deliverToApns(env: Env, pairing: Pairing, payload: Record<string, unknown>): Promise<Response> {
+export async function deliverToApns(env: Env, pairing: Pairing, payload: Record<string, unknown>): Promise<Response> {
   try {
     return await fetch(`${APNS_ORIGINS[pairing.environment]}/3/device/${pairing.device_token}`, {
       method: "POST",
