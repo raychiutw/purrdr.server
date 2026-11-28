@@ -44,8 +44,8 @@ const PUSH_RATE_WINDOW_MS = 60_000;
 /// 主機服務事件同一組密鑰＋event＋version 多久內只送一次。
 const HOST_SERVICE_DEDUP_MS = 24 * 60 * 60_000;
 /// 佇列暫停:同一組密鑰＋pane 多久內只送一次。主機端本來就承諾同一次暫停只送一次,這裡只擋重試與重複請求;
-/// 5 分鐘夠涵蓋重試,又短到「恢復後再暫停」(通常相隔更久)會再收到。
-const QUEUE_PAUSED_DEDUP_MS = 5 * 60_000;
+/// 60 秒只用來擋重送與重試;「恢復後再暫停」(host 契約:會再送)通常相隔更久,會再收到。
+const QUEUE_PAUSED_DEDUP_MS = 60_000;
 /// 每個會員每個 UTC 日預設最多幾則推播;`members.daily_push_limit` 有值時以它為準(#36)。
 export const DEFAULT_DAILY_PUSH_LIMIT = 100;
 const DAY_MS = 24 * 60 * 60_000;
@@ -99,7 +99,7 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
     throw invalid("environment must be production or sandbox.");
   }
   const device = readDeviceIdentity(body);
-  const kinds = body.kinds === undefined || body.kinds === null ? null : await readKinds(env, body.kinds);
+  const kinds = body.kinds === undefined || body.kinds === null ? null : await readKinds(env, body.kinds, { skipDisabled: true });
   const hostName = readLabel(body.name, "name", MAX_PAIRING_NAME_LENGTH) ?? null;
   const icon = readIcon(body.icon) ?? null;
 

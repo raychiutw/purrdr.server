@@ -5,7 +5,7 @@
 --   以會員為單位(同一會員多組配對只送一次),APNs 沒收下時釋放登記。resets_at 是 Unix 秒。既有配對的 kinds 不動。
 
 INSERT INTO push_kinds (code, name_en, name_zh, description_en, description_zh, default_on, transports, min_service_version, min_plugin_version, sort_order) VALUES
-  ('usage_alert', 'Plan usage', '方案用量', 'Your Claude or Codex plan usage reached 80% or 95% (Codex works over HTTPS only).', 'Claude 或 Codex 方案用量達 80% 或 95%(Codex 只支援 HTTPS 連線)。', 1, '["https","ssh"]', '0.16.0', '0.3.0', 70);
+  ('usage_alert', 'Plan usage running low', '方案用量快用完', 'Your Claude or Codex plan usage reached 80% or 95% (Codex works over HTTPS only).', 'Claude 或 Codex 方案用量達 80% 或 95%(Codex 只支援 HTTPS 連線)。', 1, '["https","ssh"]', '0.16.0', '0.3.0', 70);
 
 CREATE TABLE usage_alert_events (
   member_id TEXT NOT NULL REFERENCES members(id) ON DELETE CASCADE,

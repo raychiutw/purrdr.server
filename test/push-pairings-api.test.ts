@@ -17,16 +17,27 @@ describe("註冊配對:種類以清單為準", () => {
     expect(read.body.pairings).toEqual([{ keyHash: await hashOf(key), name: null, icon: null, kinds: ["done", "daily_limit_reached"] }]);
   });
 
-  it("未知的種類、已停用的種類、不是陣列都回 400,什麼都不存", async () => {
+  it("未知的種類、不是陣列都回 400,什麼都不存", async () => {
     const me = await member();
     await env.DB.prepare("UPDATE push_kinds SET disabled = 1 WHERE code = 'reminder'").run();
 
-    for (const kinds of [["nope"], ["blocked", "reminder"], "blocked", [1]]) {
+    for (const kinds of [["nope"], ["blocked", "nope"], "blocked", [1]]) {
       const response = await register(me.accessToken, pairingKey(), { kinds });
       expect(response.status).toBe(400);
       expect(response.body.error.code).toBe("invalid_request");
     }
     expect((await pairingsOf(me.accessToken)).body.pairings).toEqual([]);
+  });
+
+  it("帶到已停用的種類:略過該代號,其餘照存,仍回 201", async () => {
+    const me = await member();
+    const key = pairingKey();
+    await env.DB.prepare("UPDATE push_kinds SET disabled = 1 WHERE code = 'reminder'").run();
+
+    const response = await register(me.accessToken, key, { deviceId: DEVICE_ID, kinds: ["blocked", "reminder"] });
+
+    expect(response.status).toBe(201);
+    expect((await pairingsOf(me.accessToken)).body.pairings[0].kinds).toEqual(["blocked"]);
   });
 
   it("清單新增的種類不必改程式就能註冊", async () => {
