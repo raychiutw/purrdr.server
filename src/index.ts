@@ -15,7 +15,8 @@ import {
 import { syncHosts } from "./host-sync";
 import { mergeMembers, mergeSummary } from "./merge";
 import { registerPairing, revokePairing, sendPush } from "./push";
-import { listDevices, renameDevice, revokeDevice } from "./push-devices";
+import { listKinds } from "./push-kinds";
+import { listDevices, listPairings, renameDevice, revokeDevice, updatePairing } from "./push-devices";
 import { handleGooglePlayNotification, submitGooglePlayPurchase } from "./google-play";
 import { handleAppStoreNotification, submitAppStoreTransaction, subscriptionView, transferSubscription } from "./subscriptions";
 import {
@@ -76,10 +77,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   const { pathname } = url;
   const key = `${request.method} ${pathname}`;
   await enforceIpRateLimit(request, env, key);
-  const pairingPath = /^DELETE \/v1\/members\/me\/push-pairings\/([^/]+)$/.exec(key);
-  if (pairingPath) {
-    await revokePairing(env, await authenticate(env, request), decodeSegment(pairingPath[1]!));
+  const pairingPath = /^(DELETE|PATCH) \/v1\/members\/me\/push-pairings\/([^/]+)$/.exec(key);
+  if (pairingPath?.[1] === "DELETE") {
+    await revokePairing(env, await authenticate(env, request), decodeSegment(pairingPath[2]!));
     return new Response(null, { status: 204 });
+  }
+  if (pairingPath?.[1] === "PATCH") {
+    const memberId = await authenticate(env, request);
+    return json({ pairing: await updatePairing(env, memberId, decodeSegment(pairingPath[2]!), request) });
   }
   const devicePath = /^(DELETE|PATCH) \/v1\/members\/me\/push-devices\/([^/]+)$/.exec(key);
   if (devicePath?.[1] === "DELETE") {
@@ -150,10 +155,15 @@ async function route(request: Request, env: Env): Promise<Response> {
     case "POST /v1/members/me/push-pairings":
       await registerPairing(env, await authenticate(env, request), request);
       return json({ registered: true }, 201);
+    case "GET /v1/members/me/push-pairings":
+      return json({ pairings: await listPairings(env, await authenticate(env, request), url.searchParams.get("deviceId")) });
     case "GET /v1/members/me/push-devices": {
       const memberId = await authenticate(env, request);
       return json({ devices: await listDevices(env, memberId, url.searchParams.get("currentDeviceId")) });
     }
+    case "GET /v1/push-kinds":
+      await authenticate(env, request);
+      return json({ kinds: await listKinds(env) });
     case "POST /v1/push":
       return json({ delivered: await sendPush(env, request) });
     default:

@@ -1,7 +1,9 @@
 import { importPKCS8, SignJWT } from "jose";
 import { sha256Hex } from "./identity";
 import { ApiError, readJson, requireString } from "./http";
+import { readIcon, readLabel, MAX_HOST_NAME_LENGTH as MAX_PAIRING_NAME_LENGTH } from "./host-label";
 import { legacyDeviceId, readDeviceIdentity } from "./push-devices";
+import { activeKindCodes, LEGACY_DEFAULT_KINDS, readKinds, storedKinds } from "./push-kinds";
 
 /// 推播(#29、ADR-0004、ADR-0007)。
 ///
@@ -25,11 +27,6 @@ const MAX_HOST_NAME_LENGTH = 64;
 const MAX_TAB_LENGTH = 100;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const MAX_VERSION_LENGTH = 64;
-/// 配對可以選擇要收的推播種類(`host_service` = 主機服務事件;`stuck`、`reminder` 見 purrdr.server#15)。
-const PAIRING_KINDS = ["blocked", "done", "stuck", "reminder", "host_service"] as const;
-type PairingKind = (typeof PAIRING_KINDS)[number];
-/// 沒帶 `kinds` 的新配對只收「需要你」,舊版 app 行為不變。
-const DEFAULT_PAIRING_KINDS: readonly PairingKind[] = ["blocked"];
 const MAX_WORKSPACE_LENGTH = 100;
 const MAX_PUSH_BODY_BYTES = 2048;
 
@@ -46,7 +43,14 @@ const APNS_ORIGINS = { production: "https://api.push.apple.com", sandbox: "https
 /// APNs 表示「這個 token 不能再用」的回應：刪掉配對，讓外掛與 app 知道要重新配對。
 const DEAD_TOKEN_REASONS = new Set(["BadDeviceToken", "DeviceTokenNotForTopic", "Unregistered"]);
 
-type Pairing = { member_id: string; device_token: string; environment: keyof typeof APNS_ORIGINS; kinds: string };
+type Pairing = {
+  member_id: string;
+  device_token: string;
+  environment: keyof typeof APNS_ORIGINS;
+  kinds: string;
+  host_name: string | null;
+  limit_notified_day: string | null;
+};
 
 function invalid(message: string): ApiError {
   return new ApiError(400, "invalid_request", message);
@@ -84,7 +88,9 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
     throw invalid("environment must be production or sandbox.");
   }
   const device = readDeviceIdentity(body);
-  const kinds = readKinds(body);
+  const kinds = body.kinds === undefined || body.kinds === null ? null : await readKinds(env, body.kinds);
+  const hostName = readLabel(body.name, "name", MAX_PAIRING_NAME_LENGTH) ?? null;
+  const icon = readIcon(body.icon) ?? null;
 
   const existing = await env.DB.prepare("SELECT member_id, device_id FROM push_pairings WHERE key_hash = ?")
     .bind(keyHash)
@@ -107,29 +113,21 @@ export async function registerPairing(env: Env, memberId: string, request: Reque
          revoked_at = NULL`,
     ).bind(deviceId, memberId, device.name, device.model, deviceToken, environment, now),
     env.DB.prepare(
-      `INSERT INTO push_pairings (id, member_id, device_id, key_hash, kinds, created_at, updated_at)
-       VALUES (?, ?, ?, ?, COALESCE(?, ?), ?, ?)
+      `INSERT INTO push_pairings (id, member_id, device_id, key_hash, kinds, host_name, host_icon, host_icon_color, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, COALESCE(?5, ?6), ?7, ?8, ?9, ?10, ?10)
        ON CONFLICT (key_hash) DO UPDATE SET
-         device_id = excluded.device_id, kinds = COALESCE(?, push_pairings.kinds), updated_at = excluded.updated_at
+         device_id = excluded.device_id, kinds = COALESCE(?5, push_pairings.kinds), updated_at = excluded.updated_at,
+         host_name = COALESCE(?7, push_pairings.host_name),
+         host_icon = COALESCE(?8, push_pairings.host_icon), host_icon_color = COALESCE(?9, push_pairings.host_icon_color)
        WHERE push_pairings.member_id = excluded.member_id`,
-    ).bind(crypto.randomUUID(), memberId, deviceId, keyHash, kinds, JSON.stringify(DEFAULT_PAIRING_KINDS), now, now, kinds),
+    ).bind(
+      crypto.randomUUID(), memberId, deviceId, keyHash, kinds, JSON.stringify(LEGACY_DEFAULT_KINDS), hostName, icon?.symbol ?? null, icon?.color ?? null, now,
+    ),
     env.DB.prepare("DELETE FROM revoked_push_pairings WHERE key_hash = ?").bind(keyHash),
   ]);
   if (saved?.meta.changes === 0) {
     throw new ApiError(409, "pairing_in_use", "This pairing key belongs to another member.");
   }
-}
-
-/// 選用的 `kinds`:要收的推播種類，存成 JSON 字串;沒帶回 null(新配對預設只收 blocked,既有配對保留原偏好)。
-function readKinds(body: Record<string, unknown>): string | null {
-  const kinds = body.kinds;
-  if (kinds === undefined) {
-    return null;
-  }
-  if (!Array.isArray(kinds) || !kinds.every(isPairingKind)) {
-    throw invalid("kinds must be an array of blocked, done, stuck, reminder or host_service.");
-  }
-  return JSON.stringify([...new Set(kinds)]);
 }
 
 /// DELETE /v1/members/me/push-pairings/{keyHash}:撤銷(只刪自己的;不存在也算成功)。不需要有效訂閱。
@@ -236,16 +234,6 @@ function readHostServicePush(fields: Record<string, unknown>): HostServicePush {
   return { kind: "host_service", key, event, version };
 }
 
-function isPairingKind(value: unknown): value is PairingKind {
-  return typeof value === "string" && (PAIRING_KINDS as readonly string[]).includes(value);
-}
-
-/// D1 存的是 JSON 字串;只留認得的種類，舊資料或手改的值不會讓推播出錯。
-function acceptedKinds(pairing: Pairing): PairingKind[] {
-  const stored: unknown = JSON.parse(pairing.kinds);
-  return Array.isArray(stored) ? stored.filter(isPairingKind) : [...DEFAULT_PAIRING_KINDS];
-}
-
 function isPushStatus(value: string): value is PushStatus {
   return Object.hasOwn(STATUS_ALERTS, value);
 }
@@ -256,7 +244,7 @@ function isHostServiceEvent(value: string): value is HostServiceEvent {
 
 async function findPairing(env: Env, keyHash: string): Promise<Pairing | null> {
   return env.DB.prepare(
-    `SELECT p.member_id, d.push_token AS device_token, d.push_environment AS environment, p.kinds
+    `SELECT p.member_id, d.push_token AS device_token, d.push_environment AS environment, p.kinds, p.host_name, p.limit_notified_day
      FROM push_pairings p JOIN devices d ON d.id = p.device_id WHERE p.key_hash = ?`,
   )
     .bind(keyHash)
@@ -295,8 +283,8 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   // 不是錯誤：主機端不需要知道使用者的偏好。
   // 測試通知是使用者剛按下去的，不看種類偏好。
   if (push.kind !== "test") {
-    const kind: PairingKind = push.kind === "host_service" ? "host_service" : push.status;
-    if (!acceptedKinds(pairing).includes(kind)) {
+    const kind = push.kind === "host_service" ? "host_service" : push.status;
+    if (!(await acceptsKind(env, pairing, kind))) {
       return false;
     }
   }
@@ -320,6 +308,8 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
     if (hostEvent !== null) {
       await releaseHostServiceEvent(env, keyHash, hostEvent);
     }
+    // 這組配對今天還沒通知過、而且開著「今日已達上限」時,補送一則(每組配對各自登記,別組配對到上限那一刻沒收到的,下次被擋時補收)。
+    await noticeDailyLimit(env, pairing, keyHash, limit, day);
     throw new ApiError(429, "daily_limit_reached", "Today's notification limit is reached. Try again after 00:00 UTC.", {
       "retry-after": `${Math.ceil((nextUtcMidnight(now) - now) / 1000)}`,
     });
@@ -327,7 +317,7 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
 
   let response: Response;
   try {
-    response = await deliverToApns(env, pairing, await apnsPayload(push, keyHash));
+    response = await deliverToApns(env, pairing, await apnsPayload(push, keyHash, pairing.host_name));
   } catch (error) {
     // 連不上 APNs:預留與主機服務事件的去重登記都還回去,重送才不會被當成送過。
     await releaseDailyPush(env, pairing.member_id, day);
@@ -338,8 +328,8 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   }
   if (response.ok) {
     // 剛好是第 N 則:接著送一則「今日已達上限」通知(不計數、同一天只送一次)。
-    if (reservedCount === limit && (await claimLimitNotice(env, pairing.member_id, day))) {
-      await sendLimitNotice(env, pairing, keyHash, limit);
+    if (reservedCount === limit) {
+      await noticeDailyLimit(env, pairing, keyHash, limit, day);
     }
     return true;
   }
@@ -399,30 +389,45 @@ async function releaseDailyPush(env: Env, memberId: string, day: string): Promis
   await env.DB.prepare("UPDATE push_daily_usage SET sent = MAX(sent - 1, 0) WHERE member_id = ? AND day = ?").bind(memberId, day).run();
 }
 
-/// 今天還沒通知過時回 true(一個 UPDATE 完成,只有一個請求拿得到)。
-async function claimLimitNotice(env: Env, memberId: string, day: string): Promise<boolean> {
-  const claimed = await env.DB.prepare("UPDATE push_daily_usage SET limit_notified = 1 WHERE member_id = ? AND day = ? AND limit_notified = 0 RETURNING member_id")
-    .bind(memberId, day)
+/// 這組配對目前收不收這個種類:種類要還在清單裡(沒停用)而且在配對的偏好內。
+async function acceptsKind(env: Env, pairing: Pairing, kind: string): Promise<boolean> {
+  return storedKinds(pairing.kinds, await activeKindCodes(env)).includes(kind);
+}
+
+/// 這組配對今天還沒通知過時回 true(一個 UPDATE 完成,只有一個請求拿得到)。
+async function claimLimitNotice(env: Env, keyHash: string, day: string): Promise<boolean> {
+  const claimed = await env.DB.prepare(
+    "UPDATE push_pairings SET limit_notified_day = ? WHERE key_hash = ? AND (limit_notified_day IS NULL OR limit_notified_day <> ?) RETURNING key_hash",
+  )
+    .bind(day, keyHash, day)
     .first();
   return claimed !== null;
+}
+
+/// 「今日已達上限」:照這組配對的種類開關決定送不送(關著不登記),開著而且今天還沒通知過才送;不計入每日則數。
+async function noticeDailyLimit(env: Env, pairing: Pairing, keyHash: string, limit: number, day: string): Promise<void> {
+  if ((await acceptsKind(env, pairing, "daily_limit_reached")) && (await claimLimitNotice(env, keyHash, day))) {
+    await sendLimitNotice(env, pairing, keyHash, limit);
+  }
 }
 
 /// 「今日已達上限」通知:送到觸發的那支裝置;失敗不影響剛送出的那則推播。
 async function sendLimitNotice(env: Env, pairing: Pairing, keyHash: string, limit: number): Promise<void> {
   try {
-    await deliverToApns(env, pairing, limitNoticePayload(keyHash, limit));
+    await deliverToApns(env, pairing, limitNoticePayload(keyHash, limit, pairing.host_name));
   } catch {
     // 通知送不到不重試:今天已經標記過,不重複打擾。
   }
 }
 
-function limitNoticePayload(keyHash: string, limit: number): Record<string, unknown> {
+function limitNoticePayload(keyHash: string, limit: number, hostName: string | null): Record<string, unknown> {
   return {
     aps: {
       alert: {
         "title-loc-key": "Daily notification limit reached",
         "loc-key": "You've reached today's limit of %@ notifications. They'll resume at 00:00 UTC.",
         "loc-args": [String(limit)],
+        ...subtitleOf(hostName),
       },
       sound: "default",
       "interruption-level": "active",
@@ -462,6 +467,11 @@ function pairingRevoked(): ApiError {
   return new ApiError(410, "pairing_revoked", "This device no longer accepts notifications. Turn notifications on again in Purrdr.");
 }
 
+/// 副標題 = 這組配對的電腦名稱;沒有名稱(舊配對)不帶,由 app 的 Notification Service Extension 補。
+function subtitleOf(hostName: string | null): { subtitle?: string } {
+  return hostName === null ? {} : { subtitle: hostName };
+}
+
 /// 各狀態的固定內文(app 的字串表以 `loc-key` 翻譯)、通知類別與中斷等級。
 /// 「需要你」「仍在等你」用 Time Sensitive;「完成」「可能卡住」用 active,專注模式下不打斷。
 const STATUS_ALERTS: Record<PushStatus, { locKey: string; category: string; interruptionLevel: string }> = {
@@ -473,9 +483,9 @@ const STATUS_ALERTS: Record<PushStatus, { locKey: string; category: string; inte
 
 /// APNs payload 由後台組：標題是 workspace 名稱，內文依狀態固定。
 /// 根層的 `pairing`(配對密鑰雜湊)與 `pane` 給 app 點通知時找主機與 Agent。
-export async function apnsPayload(push: PushRequest, keyHash: string): Promise<Record<string, unknown>> {
+export async function apnsPayload(push: PushRequest, keyHash: string, hostName: string | null = null): Promise<Record<string, unknown>> {
   if (push.kind === "host_service") {
-    return hostServicePayload(push, keyHash);
+    return hostServicePayload(push, keyHash, hostName);
   }
   if (push.kind === "test") {
     return testPayload(push, keyHash);
@@ -483,7 +493,7 @@ export async function apnsPayload(push: PushRequest, keyHash: string): Promise<R
   const alert = STATUS_ALERTS[push.status];
   return {
     aps: {
-      alert: { title: push.tab === null ? push.workspace : `${push.workspace} · ${push.tab}`, "loc-key": alert.locKey },
+      alert: { title: push.tab === null ? push.workspace : `${push.workspace} · ${push.tab}`, ...subtitleOf(hostName), "loc-key": alert.locKey },
       // 讓 app 的 Notification Service Extension 能改寫通知;同一配對同一 workspace 的通知疊在一起(不含主機名稱與 tab)。
       "mutable-content": 1,
       "thread-id": await sha256Hex(`${keyHash}\n${push.workspace}`),
@@ -525,11 +535,11 @@ const HOST_SERVICE_ALERTS: Record<HostServiceEvent, { locKey: string; withVersio
 };
 
 /// 主機服務事件：標題固定「Host service」(不帶主機名稱或對話),passive 不出聲打斷。
-function hostServicePayload(push: HostServicePush, keyHash: string): Record<string, unknown> {
+function hostServicePayload(push: HostServicePush, keyHash: string, hostName: string | null): Record<string, unknown> {
   const alert = HOST_SERVICE_ALERTS[push.event];
   return {
     aps: {
-      alert: { "title-loc-key": "Host service", "loc-key": alert.locKey, ...(alert.withVersion ? { "loc-args": [push.version] } : {}) },
+      alert: { "title-loc-key": "Host service", "loc-key": alert.locKey, ...subtitleOf(hostName), ...(alert.withVersion ? { "loc-args": [push.version] } : {}) },
       "interruption-level": "passive",
       "mutable-content": 1,
       category: "HOST_SERVICE_EVENT",

@@ -15,4 +15,12 @@ afterEach(async () => {
   for (const table of ["push_daily_usage", "subscription_events", "subscription_transfers", "subscriptions", "sessions", "identities", "synced_hosts", "host_service_push_events", "push_pairings", "devices", "revoked_push_pairings", "members"]) {
     await env.DB.prepare(`DELETE FROM ${table}`).run();
   }
+  // push_kinds 是 migration 播種的種類清單,不清空;只還原測試可能改過的欄位與新增的列。
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM push_kinds WHERE code NOT IN ('blocked', 'done', 'stuck', 'reminder', 'host_service', 'daily_limit_reached')"),
+    env.DB.prepare(
+      `UPDATE push_kinds SET disabled = 0, min_service_version = NULL, min_plugin_version = NULL,
+         sort_order = CASE code WHEN 'blocked' THEN 10 WHEN 'done' THEN 20 WHEN 'stuck' THEN 30 WHEN 'reminder' THEN 40 WHEN 'host_service' THEN 50 ELSE 60 END`,
+    ),
+  ]);
 });
