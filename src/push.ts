@@ -18,13 +18,15 @@ const DEVICE_TOKEN = /^[0-9a-f]{64,200}$/;
 const PANE_ID = /^[A-Za-z0-9:_.-]{1,64}$/;
 const ENVIRONMENTS = new Set(["production", "sandbox"]);
 /// 外掛可以送的欄位;其他一律拒絕。
-const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane", "tab"]);
+const PUSH_FIELDS = new Set(["key", "workspace", "status", "pane", "tab", "workSeconds"]);
 /// 主機服務事件可以送的欄位;與上面的狀態形狀互斥。
 const HOST_SERVICE_PUSH_FIELDS = new Set(["key", "event", "version"]);
 /// 測試通知(#19):配對密鑰、事件名與選填的主機名稱，不收 version、pane 等任何其他欄位。
 const TEST_PUSH_FIELDS = new Set(["key", "event", "host_name"]);
 const MAX_HOST_NAME_LENGTH = 64;
 const MAX_TAB_LENGTH = 100;
+/// 「長時間工作完成」的門檻(秒):固定寫在後台,使用者不能調(#40)。
+const LONG_WORK_SECONDS = 600;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const MAX_VERSION_LENGTH = 64;
 const MAX_WORKSPACE_LENGTH = 100;
@@ -142,7 +144,7 @@ export async function revokePairing(env: Env, memberId: string, keyHash: string)
 
 type PushStatus = "blocked" | "done" | "stuck" | "reminder" | "queue_paused";
 type HostServiceEvent = "host_service_update_available" | "host_service_updated" | "host_service_update_rolled_back";
-type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null; tab: string | null };
+type StatusPush = { kind: "status"; key: string; workspace: string; status: PushStatus; pane: string | null; tab: string | null; workSeconds: number | null; longWork?: boolean };
 type HostServicePush = { kind: "host_service"; key: string; event: HostServiceEvent; version: string | null };
 /// 使用者在 app 帳號頁按「傳送測試通知」:不是配對的推播種類，不受偏好、去重影響。
 type TestPush = { kind: "test"; key: string; hostName: string | null };
@@ -200,7 +202,18 @@ function readStatusPush(fields: Record<string, unknown>): StatusPush {
   if (status === "queue_paused" && pane === null) {
     throw invalid("pane is required for queue_paused.");
   }
-  return { kind: "status", key, workspace, status, pane, tab: readOptionalLabel(fields.tab, "tab", MAX_TAB_LENGTH) };
+  return { kind: "status", key, workspace, status, pane, tab: readOptionalLabel(fields.tab, "tab", MAX_TAB_LENGTH), workSeconds: readWorkSeconds(fields.workSeconds) };
+}
+
+/// 選填的工作秒數(`done` 事件,#40):非負整數;沒帶回 null,型別不對回 400。
+function readWorkSeconds(value: unknown): number | null {
+  if (value === undefined) {
+    return null;
+  }
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw invalid("workSeconds must be a non-negative integer.");
+  }
+  return value;
 }
 
 function readTestPush(fields: Record<string, unknown>): TestPush {
@@ -288,10 +301,16 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
   }
   // 不是錯誤：主機端不需要知道使用者的偏好。
   // 測試通知是使用者剛按下去的，不看種類偏好。
+  let outgoing: PushRequest = push;
   if (push.kind !== "test") {
     const kind = push.kind === "host_service" ? "host_service" : push.status;
     if (!(await acceptsKind(env, pairing, kind))) {
-      return false;
+      // 「完成」沒開,但工作超過門檻而且開了「長時間工作完成」:改送那一則(「完成」開著時照常送「完成」,不重複)。
+      const isLongWork = push.kind === "status" && kind === "done" && (push.workSeconds ?? 0) >= LONG_WORK_SECONDS;
+      if (!isLongWork || !(await acceptsKind(env, pairing, "long_work_done"))) {
+        return false;
+      }
+      outgoing = { ...push, longWork: true };
     }
   }
   const hostEvent = push.kind === "host_service" ? push : null;
@@ -333,7 +352,7 @@ export async function sendPush(env: Env, request: Request): Promise<boolean> {
 
   let response: Response;
   try {
-    response = await deliverToApns(env, pairing, await apnsPayload(push, keyHash, pairing.host_name));
+    response = await deliverToApns(env, pairing, await apnsPayload(outgoing, keyHash, pairing.host_name));
   } catch (error) {
     // 連不上 APNs:預留與主機服務事件的去重登記都還回去,重送才不會被當成送過。
     await releaseDailyPush(env, pairing.member_id, day);
@@ -511,6 +530,8 @@ function subtitleOf(hostName: string | null): { subtitle?: string } {
   return hostName === null ? {} : { subtitle: hostName };
 }
 
+const LONG_WORK_LOC_KEY = "An agent finished a long task.";
+
 /// 各狀態的固定內文(app 的字串表以 `loc-key` 翻譯)、通知類別與中斷等級。
 /// 「需要你」「仍在等你」用 Time Sensitive;「完成」「可能卡住」用 active,專注模式下不打斷。
 const STATUS_ALERTS: Record<PushStatus, { locKey: string; fallbackLocKey?: string; category: string; interruptionLevel: string }> = {
@@ -531,7 +552,7 @@ export async function apnsPayload(push: PushRequest, keyHash: string, hostName: 
   if (push.kind === "test") {
     return testPayload(push, keyHash);
   }
-  const alert = STATUS_ALERTS[push.status];
+  const alert = push.longWork === true ? { ...STATUS_ALERTS.done, locKey: LONG_WORK_LOC_KEY } : STATUS_ALERTS[push.status];
   // 佇列暫停:標題只放 workspace,Tab 名稱以 loc-args 帶進內文;沒有 Tab 用後備字串。
   const body =
     alert.fallbackLocKey === undefined
