@@ -1,7 +1,6 @@
 import { ApiError, optionalString, readJson } from "./http";
 import { iconView, MAX_HOST_NAME_LENGTH, readIcon, readLabel, type HostIcon } from "./host-label";
 import { activeKindCodes, readKinds, storedKinds } from "./push-kinds";
-import { requireActiveSubscription } from "./subscriptions";
 
 /// 通知裝置(purrdr.server#5):同一支裝置在多台主機的配對以 device id 歸成一台裝置。
 /// 清單不回傳 device token 與配對密鑰(雜湊也不給)。
@@ -235,7 +234,6 @@ export async function renameDevice(
   currentDeviceId: string | null,
 ): Promise<PushDeviceView> {
   const name = parseDeviceName(optionalString(await readJson(request), "name") ?? "");
-  await requireActiveSubscription(env, memberId);
   const normalizedDeviceId = deviceId.toLowerCase();
   const [first] = await requirePairingsOfDevice(env, memberId, normalizedDeviceId);
   await env.DB.prepare("UPDATE devices SET name = ? WHERE id = ?").bind(name, first!.storedDeviceId).run();
