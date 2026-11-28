@@ -14,6 +14,7 @@ import {
 } from "./members";
 import { syncHosts } from "./host-sync";
 import { mergeMembers, mergeSummary } from "./merge";
+import { detectOfflineHosts, receiveHeartbeat } from "./presence";
 import { registerPairing, revokePairing, sendPush } from "./push";
 import { listKinds } from "./push-kinds";
 import { listDevices, listPairings, renameDevice, revokeDevice, updatePairing } from "./push-devices";
@@ -44,6 +45,10 @@ export default {
       console.error(error);
       return errorResponse(new ApiError(500, "internal_error", "Something went wrong."));
     }
+  },
+  /// Cron Trigger(每 5 分鐘,見 wrangler.jsonc):判定主機離線(#43)。
+  async scheduled(_controller, env, _ctx): Promise<void> {
+    await detectOfflineHosts(env);
   },
 } satisfies ExportedHandler<Env>;
 
@@ -164,6 +169,8 @@ async function route(request: Request, env: Env): Promise<Response> {
     case "GET /v1/push-kinds":
       await authenticate(env, request);
       return json({ kinds: await listKinds(env) });
+    case "POST /v1/heartbeat":
+      return json(await receiveHeartbeat(env, request));
     case "POST /v1/push":
       return json({ delivered: await sendPush(env, request) });
     default:

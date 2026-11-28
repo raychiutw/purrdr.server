@@ -13,7 +13,7 @@ const RELAY = "abc123@privaterelay.appleid.com";
 /// 依 foreign key 的相反順序丟掉所有資料表(D1 不能關掉 foreign key),含 d1_migrations,讓 migration 從頭套用。
 async function dropEverything() {
   const tables = [
-    "usage_alert_events", "queue_paused_events", "push_daily_usage", "push_kinds", "host_service_push_events", "subscription_events", "subscription_transfers", "sessions", "push_pairings", "subscriptions",
+    "host_presence", "usage_alert_events", "queue_paused_events", "push_daily_usage", "push_kinds", "host_service_push_events", "subscription_events", "subscription_transfers", "sessions", "push_pairings", "subscriptions",
     "devices", "revoked_push_pairings", "push_devices", "refresh_tokens", "entitlements", "synced_hosts", "identities", "members",
     "d1_migrations",
   ];
