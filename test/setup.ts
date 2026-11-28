@@ -17,10 +17,10 @@ afterEach(async () => {
   }
   // push_kinds 是 migration 播種的種類清單,不清空;只還原測試可能改過的欄位與新增的列。
   await env.DB.batch([
-    env.DB.prepare("DELETE FROM push_kinds WHERE code NOT IN ('blocked', 'done', 'stuck', 'reminder', 'host_service', 'daily_limit_reached', 'usage_alert')"),
+    env.DB.prepare("DELETE FROM push_kinds WHERE code NOT IN ('blocked', 'done', 'stuck', 'reminder', 'host_service', 'daily_limit_reached', 'long_work_done', 'usage_alert')"),
     env.DB.prepare(
-      `UPDATE push_kinds SET disabled = 0, min_service_version = NULL, min_plugin_version = NULL,
-         sort_order = CASE code WHEN 'blocked' THEN 10 WHEN 'done' THEN 20 WHEN 'stuck' THEN 30 WHEN 'reminder' THEN 40 WHEN 'host_service' THEN 50 WHEN 'daily_limit_reached' THEN 60 ELSE 70 END`,
+      `UPDATE push_kinds SET disabled = 0, min_service_version = CASE WHEN code IN ('long_work_done', 'usage_alert') THEN '0.16.0' END, min_plugin_version = CASE WHEN code IN ('long_work_done', 'usage_alert') THEN '0.3.0' END,
+         sort_order = CASE code WHEN 'blocked' THEN 10 WHEN 'done' THEN 20 WHEN 'long_work_done' THEN 25 WHEN 'stuck' THEN 30 WHEN 'reminder' THEN 40 WHEN 'host_service' THEN 50 WHEN 'daily_limit_reached' THEN 60 ELSE 70 END`,
     ),
   ]);
 });
