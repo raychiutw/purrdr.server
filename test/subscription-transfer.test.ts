@@ -97,7 +97,7 @@ describe("轉移成功", () => {
     expect(calls[0]!.jwtValid).toBe(true);
   });
 
-  it("原會員的 Plus 立即失效:訂閱讀不到、推播配對回 410、主機同步 403;新會員同步成功", async () => {
+  it("原會員的 Plus 立即失效:訂閱讀不到、主機同步 403;推播配對保留、照常送達(#44);新會員同步成功", async () => {
     const { owner, me, ownerKey } = await setup();
     expect((await push(ownerKey)).status).toBe(200);
     expect((await sync(owner.accessToken)).status).toBe(200);
@@ -106,9 +106,9 @@ describe("轉移成功", () => {
     expect((await transfer(me.accessToken)).status).toBe(200);
 
     expect((await subscriptionOf(owner.accessToken)).body.subscription).toBeNull();
+    // 推播不需要 Plus(#36):轉出訂閱不影響原會員的推播配對。
     const sent = await push(ownerKey);
-    expect(sent.status).toBe(410);
-    expect(sent.body.error.code).toBe("pairing_revoked");
+    expect(sent.status).toBe(200);
     const ownerSync = await sync(owner.accessToken);
     expect(ownerSync.status).toBe(403);
     expect(ownerSync.body.error.code).toBe("subscription_required");

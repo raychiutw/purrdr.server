@@ -161,9 +161,8 @@ app 遇到沒帶或不認得的值沿用本機圖示(沒有就用預設)。
 | 409 | `subscription_already_owned` | 訂閱已屬於目前會員 |
 | 409 | `subscription_already_active` | 目前會員已佔著有效訂閱名額(生效中、帳單寬限期、帳單重試期);什麼都沒動 |
 
-**一個 D1 batch(原子)**:改 `subscriptions.member_id`、寫 `subscription_transfers`、寫 `subscription_events`(`client` / `transferred`)、
-撤銷原會員的推播配對(寫 `revoked_push_pairings` 並刪 `push_pairings`,主機外掛之後送推播收 410 `pairing_revoked`,做法同遠端關閉裝置)。
-原會員若還有別的有效訂閱則不撤銷配對。原會員的 Plus 因訂閱不再屬於它而**立即失效**,主機同步因 `requireActiveSubscription` 回 403 `subscription_required`。
+**一個 D1 batch(原子)**:改 `subscriptions.member_id`、寫 `subscription_transfers`、寫 `subscription_events`(`client` / `transferred`)。
+原會員的推播配對**保留**(推播從 #36 起不需要 Plus,#44 起轉移不再撤銷,主機外掛照常送、不會收到 410)。原會員的 Plus 因訂閱不再屬於它而**立即失效**,主機同步因 `requireActiveSubscription` 回 403 `subscription_required`。
 
 **Set App Account Token**:batch 之後呼叫 `setAppAccountToken`(`appAccountToken` = 新會員 ID),讓之後續訂的交易歸新會員。
 **失敗不回滾轉移**(Apple 不可達是常態):記 `subscription_events`(`store_api` / `set_app_account_token_failed`),回應 `appAccountTokenUpdated: false`;成功記 `app_account_token_set`。
