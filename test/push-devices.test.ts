@@ -251,11 +251,25 @@ describe("裝置改名", () => {
     expect((await devices(other.accessToken)).body.devices[0].name).toBe("Ray 的 iPhone");
   });
 
-  it("訂閱到期後不能改名(403 subscription_required)", async () => {
+  it("訂閱到期後仍能改名(改名不需要 Plus)", async () => {
     const me = await expiredMemberWithPhone();
     const renamed = await rename(me.accessToken, PHONE_ID, "我的");
-    expect(renamed.status).toBe(403);
-    expect(renamed.body.error.code).toBe("subscription_required");
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.device).toMatchObject({ deviceId: PHONE_ID, name: "我的" });
+  });
+
+  it("從沒訂閱過的會員也能改名", async () => {
+    const signIn = await signInWithApple("apple-user-free");
+    const me = { accessToken: signIn.body.accessToken as string };
+    await enable(me.accessToken, phone);
+    const renamed = await rename(me.accessToken, PHONE_ID, "我的");
+    expect(renamed.status).toBe(200);
+    expect(renamed.body.device).toMatchObject({ name: "我的" });
+  });
+
+  it("沒登入不能改名(401)", async () => {
+    const res = await api("PATCH", `/v1/members/me/push-devices/${PHONE_ID}`, { body: { name: "x" } });
+    expect(res.status).toBe(401);
   });
 
   it.each([
